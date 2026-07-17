@@ -6,8 +6,9 @@
 {$PORTFLOW_SITE_ADDRESS} {
 	encode zstd gzip
 
-	@api path /api/*
-	reverse_proxy @api control:8080
+	handle /api/* {
+		reverse_proxy control:8080
+	}
 
 	handle {
 		root * /srv

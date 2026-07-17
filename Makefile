@@ -1,7 +1,7 @@
 VERSION ?= dev
 LDFLAGS = -s -w -X main.version=$(VERSION) -X main.agentVersion=$(VERSION)
 
-.PHONY: build test fmt web-build preflight installer-test
+.PHONY: build test fmt web-build preflight installer-test caddy-route-test
 
 build:
 	mkdir -p bin
@@ -24,3 +24,7 @@ installer-test:
 	bash -n install.sh
 	bash -s -- --help < install.sh >/dev/null
 	./scripts/install_test.sh
+	./scripts/caddy_route_test.sh
+
+caddy-route-test:
+	./scripts/caddy_route_test.sh
