@@ -12,9 +12,9 @@ npm --prefix web run build
 构建 AMD64 二进制和 ARM64 Agent：
 
 ```bash
-make build VERSION=1.1.1
+make build VERSION=1.1.2
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -buildvcs=false -trimpath \
-  -ldflags "-s -w -X main.agentVersion=1.1.1" \
+  -ldflags "-s -w -X main.agentVersion=1.1.2" \
   -o /tmp/portflow-agent-linux-arm64 ./cmd/agent
 ```
 
@@ -61,6 +61,6 @@ docker compose -p portflow-integration \
 docker run --rm \
   -e PORTFLOW_SITE_ADDRESS=panel.example.com \
   -e CADDY_EMAIL=admin@example.com \
-  portflow-web:1.1.1 \
+  portflow-web:1.1.2 \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ```

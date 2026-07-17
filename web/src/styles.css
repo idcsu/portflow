@@ -221,3 +221,36 @@ td b { font-size: 13px; }
 
 @media (max-width: 760px) { main { width: 100%; margin-left: 0; }.sidebar { width: 254px; }.content { padding-top: 28px; }.log-guide { align-items: flex-start; flex-direction: column; gap: 6px; } }
 @media (max-width: 560px) { .recovery-grid { grid-template-columns: 1fr; }.auth-card { padding: 28px 24px; }.category-tabs { margin-inline: -4px; } }
+
+/* Calm motion and consistent dismissible-layer transitions. */
+.top-popover {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-7px) scale(.975);
+  transform-origin: top center;
+  transition: opacity .14s ease, transform .18s cubic-bezier(.2,.8,.2,1);
+  will-change: opacity, transform;
+}
+.top-popover.is-open { opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }
+.top-popover.is-closing { opacity: 0; pointer-events: none; transform: translateY(-4px) scale(.985); }
+.search-popover { transform-origin: top left; }
+.notification-popover,.account-popover { transform-origin: top right; }
+.icon-button,.profile,.nav-item,.primary-button,.select-button,.text-button,.row-actions button,.member-edit-button,.member-delete-button {
+  transition: color .16s ease, background-color .16s ease, border-color .16s ease, box-shadow .18s ease, transform .16s ease;
+}
+.icon-button:active,.profile:active,.primary-button:active,.select-button:active,.row-actions button:active { transform: scale(.96); }
+.profile > svg:last-child { transition: transform .18s cubic-bezier(.2,.8,.2,1); }
+.profile.active > svg:last-child { transform: rotate(180deg); }
+.notification-item,.search-result,.account-action { transition: color .14s ease, background-color .14s ease, padding-left .16s ease; }
+.notification-item:hover,.search-result:hover,.account-action:hover { padding-left: 17px; }
+.modal-backdrop { animation: layer-fade-in .18s ease both; }
+.modal-card { animation: modal-rise-in .22s cubic-bezier(.2,.8,.2,1) both; transform-origin: center; }
+.content > section,.content > .stat-grid,.content > .dashboard-grid { animation: content-settle-in .24s ease both; }
+
+@keyframes layer-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-rise-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes content-settle-in { from { opacity: .25; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *,*::before,*::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

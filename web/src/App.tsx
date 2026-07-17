@@ -27,7 +27,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
 type Summary = {
   nodes: { online: number; offline: number }
@@ -68,7 +68,7 @@ const fallbackSummary: Summary = {
 }
 
 const emptyTraffic: TrafficHistory = { from: '', to: '', intervalSeconds: 1800, uploadBytes: 0, downloadBytes: 0, points: [] }
-const installerVersion = '1.1.1'
+const installerVersion = '1.1.2'
 const installerRepository = 'idcsu/portflow'
 
 function shellQuote(value: string) {
@@ -200,6 +200,28 @@ function ResourceSparkline({ points }: { points: NodeMetricPoint[] }) {
   </div>
 }
 
+function AnimatedPopover({ open, className, children, role = 'dialog' }: { open: boolean; className: string; children: ReactNode; role?: 'dialog' | 'menu' | 'listbox' }) {
+  const [rendered, setRendered] = useState(open)
+  const [visible, setVisible] = useState(false)
+  const visibleChildren = useRef(children)
+  if (open) visibleChildren.current = children
+
+  useEffect(() => {
+    if (open) {
+      setRendered(true)
+      const frame = window.requestAnimationFrame(() => setVisible(true))
+      return () => window.cancelAnimationFrame(frame)
+    }
+    setVisible(false)
+    if (!rendered) return
+    const timer = window.setTimeout(() => setRendered(false), 180)
+    return () => window.clearTimeout(timer)
+  }, [open, rendered])
+
+  if (!rendered) return null
+  return <div className={`top-popover ${className} ${visible ? 'is-open' : 'is-closing'}`} role={role} aria-hidden={!open}>{visibleChildren.current}</div>
+}
+
 function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [setup, setSetup] = useState(false)
   const [setupRequired, setSetupRequired] = useState(false)
@@ -318,6 +340,9 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem('portflow-theme') === 'dark' ? 'dark' : 'light')
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const searchShellRef = useRef<HTMLDivElement>(null)
+  const notificationShellRef = useRef<HTMLDivElement>(null)
+  const accountShellRef = useRef<HTMLDivElement>(null)
   const [apiOnline, setApiOnline] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [checkingAuth, setCheckingAuth] = useState(true)
@@ -383,6 +408,9 @@ function App() {
   function openNode(nodeId: string) {
     setActiveView('nodes')
     setMenuOpen(false)
+    setSearchQuery('')
+    setNotificationOpen(false)
+    setAccountMenuOpen(false)
     void loadNodeDetail(nodeId)
   }
 
@@ -472,6 +500,9 @@ function App() {
   function switchView(view: View) {
     setActiveView(view)
     setMenuOpen(false)
+    setSearchQuery('')
+    setNotificationOpen(false)
+    setAccountMenuOpen(false)
     if (view === 'audit' && user?.role === 'admin' && auditItems.length === 0) void loadAudit()
     if (view === 'logs' && user?.role === 'admin' && logItems.length === 0) void loadLogs()
     if (view === 'connections') void loadConnections()
@@ -511,11 +542,25 @@ function App() {
         setSearchQuery('')
         setNotificationOpen(false)
         setAccountMenuOpen(false)
+        setMenuOpen(false)
       }
     }
     window.addEventListener('keydown', focusSearch)
     return () => window.removeEventListener('keydown', focusSearch)
   }, [])
+
+  useEffect(() => {
+    if (!searchQuery.trim() && !notificationOpen && !accountMenuOpen) return
+    const dismissOutside = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (searchQuery.trim() && !searchShellRef.current?.contains(target)) setSearchQuery('')
+      if (notificationOpen && !notificationShellRef.current?.contains(target)) setNotificationOpen(false)
+      if (accountMenuOpen && !accountShellRef.current?.contains(target)) setAccountMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', dismissOutside)
+    return () => document.removeEventListener('pointerdown', dismissOutside)
+  }, [searchQuery, notificationOpen, accountMenuOpen])
 
   useEffect(() => {
     if (!user) return
@@ -889,24 +934,24 @@ function App() {
       <main>
         <header className="topbar">
           <button className="menu-button" onClick={() => setMenuOpen(true)} aria-label="打开菜单"><Menu /></button>
-          <div className="search-shell">
+          <div className="search-shell" ref={searchShellRef}>
             <div className="search"><Search size={17} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} aria-label="全局搜索" placeholder="搜索节点或线路..." /><kbd>⌘ K</kbd>{searchQuery && <button onClick={() => setSearchQuery('')} aria-label="清空搜索"><X size={14} /></button>}</div>
-            {normalizedSearch && <div className="top-popover search-popover">
+            <AnimatedPopover open={Boolean(normalizedSearch)} className="search-popover" role="listbox">
               <div className="popover-heading"><b>搜索结果</b><span>{searchResults.length} 项</span></div>
               {searchResults.map((result) => <button key={`${result.kind}-${result.id}`} className="search-result" onClick={() => { if (result.kind === 'node') openNode(result.id); else switchView('rules'); setSearchQuery('') }}><span className={result.kind === 'node' ? 'search-result-icon node' : 'search-result-icon rule'}>{result.kind === 'node' ? <Boxes size={15} /> : <Cable size={15} />}</span><span><b>{result.label}</b><small>{result.meta}</small></span></button>)}
               {searchResults.length === 0 && <div className="popover-empty">没有匹配的节点或线路</div>}
-            </div>}
+            </AnimatedPopover>
           </div>
           <div className="top-actions">
             <button className="icon-button theme-button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={theme === 'light' ? '切换到深色主题' : '切换到明亮主题'} title={theme === 'light' ? '切换到深色主题' : '切换到明亮主题'}>{theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}</button>
-            <div className="top-action-shell">
+            <div className="top-action-shell" ref={notificationShellRef}>
               <button className={notificationOpen ? 'icon-button active' : 'icon-button'} onClick={() => { setNotificationOpen(!notificationOpen); setAccountMenuOpen(false) }} aria-label="通知" aria-expanded={notificationOpen}><Bell size={19} />{alertNotifications.length > 0 && <span className="notification-dot" />}</button>
-              {notificationOpen && <div className="top-popover notification-popover"><div className="popover-heading"><b>状态通知</b><span>{alertNotifications.length > 0 ? `${alertNotifications.length} 项待处理` : '当前正常'}</span></div>{notifications.map((notification) => <button key={notification.id} className="notification-item" onClick={() => { switchView(notification.view); setNotificationOpen(false) }}><span className={notification.level === 'healthy' ? 'notice-icon healthy' : 'notice-icon warning'}>{notification.level === 'healthy' ? <CheckCircle2 size={16} /> : <Bell size={16} />}</span><span><b>{notification.title}</b><small>{notification.detail}</small></span></button>)}</div>}
+              <AnimatedPopover open={notificationOpen} className="notification-popover"><div className="popover-heading"><b>状态通知</b><span>{alertNotifications.length > 0 ? `${alertNotifications.length} 项待处理` : '当前正常'}</span></div>{notifications.map((notification) => <button key={notification.id} className="notification-item" onClick={() => { switchView(notification.view); setNotificationOpen(false) }}><span className={notification.level === 'healthy' ? 'notice-icon healthy' : 'notice-icon warning'}>{notification.level === 'healthy' ? <CheckCircle2 size={16} /> : <Bell size={16} />}</span><span><b>{notification.title}</b><small>{notification.detail}</small></span></button>)}</AnimatedPopover>
             </div>
             <div className="divider" />
-            <div className="top-action-shell">
+            <div className="top-action-shell" ref={accountShellRef}>
               <button className={accountMenuOpen ? 'profile active' : 'profile'} onClick={() => { setAccountMenuOpen(!accountMenuOpen); setNotificationOpen(false) }} aria-label="打开账户菜单" aria-expanded={accountMenuOpen}><span className="avatar">{user.username.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{user.username}</b><small>{user.role === 'admin' ? '管理员' : '普通成员'}</small></span><ChevronDown size={16} /></button>
-              {accountMenuOpen && <div className="top-popover account-popover"><div className="account-summary"><span className="avatar large">{user.username.slice(0, 1).toUpperCase()}</span><span><b>{user.username}</b><small>{user.role === 'admin' ? '管理员账户' : '普通成员账户'}</small></span></div><button className="account-action" onClick={openSecurityCenter}><KeyRound size={16} /><span>账户安全</span><em>{user.mfaEnabled ? '已开启二次验证' : '建议开启'}</em></button><button className="account-action danger" onClick={() => void logout()}><LogOut size={16} /><span>退出登录</span></button></div>}
+              <AnimatedPopover open={accountMenuOpen} className="account-popover" role="menu"><div className="account-summary"><span className="avatar large">{user.username.slice(0, 1).toUpperCase()}</span><span><b>{user.username}</b><small>{user.role === 'admin' ? '管理员账户' : '普通成员账户'}</small></span></div><button className="account-action" onClick={openSecurityCenter}><KeyRound size={16} /><span>账户安全</span><em>{user.mfaEnabled ? '已开启二次验证' : '建议开启'}</em></button><button className="account-action danger" onClick={() => void logout()}><LogOut size={16} /><span>退出登录</span></button></AnimatedPopover>
             </div>
           </div>
         </header>
@@ -1175,7 +1220,7 @@ function App() {
               {logNextBefore && <button className="load-more" disabled={logLoading} onClick={() => loadLogs(logNextBefore, true)}>{logLoading ? '正在读取…' : '加载更早日志'}</button>}
             </section>
           </>}
-          <footer><span>PortFlow 控制面 · 1.1.1</span><span>数据面与控制面独立运行</span></footer>
+          <footer><span>PortFlow 控制面 · 1.1.2</span><span>数据面与控制面独立运行</span></footer>
         </div>
       </main>
       {showEnrollment && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="添加新节点"><button className="modal-backdrop" onClick={closeEnrollment} aria-label="关闭" /><section className="modal-card">
