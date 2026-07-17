@@ -2,18 +2,31 @@
 
 PortFlow 是一个稳定优先的内部多节点 TCP/UDP 端口转发管理面板。内部团队首版功能已经完成，覆盖完整 Web 管理、权限与审计、多节点 Agent、TCP/UDP 直连与基于既有 WireGuard 的双节点中转、限速、监控、部署诊断和升级回滚。
 
+项目仓库：[github.com/idcsu/portflow](https://github.com/idcsu/portflow)
+
 完整的产品范围、稳定性要求和机器操作约束见 [PROJECT_SPEC.md](./PROJECT_SPEC.md)。
 正式试运行的 Compose、HTTPS、systemd Agent、备份和回滚流程见 [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)。
 普通测试、数据竞争检查和真实 PostgreSQL 集成测试见 [docs/TESTING.md](./docs/TESTING.md)。
 正式发布前请执行 [scripts/preflight.sh](./scripts/preflight.sh)，并逐项完成 [首版发布清单](./docs/RELEASE_CHECKLIST.md)。
-上传到 GitHub 后，可使用中文交互式 [一键部署与管理脚本](./docs/ONE_CLICK_INSTALL.md) 完成控制面安装、可选 Docker 安装、更新、设置、备份、回滚、Agent 端口防火墙管理和卸载。
+可使用中文交互式 [一键部署与管理脚本](./docs/ONE_CLICK_INSTALL.md) 完成控制面安装、可选 Docker 安装、更新、设置、备份、回滚、Agent 端口防火墙管理和卸载。
 
-GitHub 正式标签的一键安装示例（替换 `OWNER/REPO`）：
+## 快速安装
+
+固定到正式标签 `v1.0.1` 安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.0.1/install.sh \
-  | sudo bash -s -- install --repo OWNER/REPO --version 1.0.1
+curl -fsSL https://raw.githubusercontent.com/idcsu/portflow/v1.0.1/install.sh \
+  | sudo bash -s -- install --repo idcsu/portflow --version 1.0.1
 ```
+
+安装前只读检查：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/idcsu/portflow/v1.0.1/install.sh \
+  | sudo bash -s -- check
+```
+
+安装完成后运行 `sudo portflow` 打开中文管理菜单。脚本支持 Debian/Ubuntu 上经确认安装 Docker Engine 和 Compose，也支持 Agent 入口端口的 UFW/firewalld 放行与恢复。脚本不会自动启用防火墙，不会重置现有规则；云安全组需要在云平台单独配置。
 
 ## 当前结构
 
@@ -45,7 +58,7 @@ npm --prefix web run dev
 
 开发服务器仅绑定本地回环地址，不要求修改防火墙。
 
-未设置 `DATABASE_URL` 时，控制端会明确警告并使用仅供开发的内存存储，重启后数据消失。正式部署必须配置 PostgreSQL；控制端首次连接时会自动执行事务化迁移。环境变量示例见 [.env.example](./.env.example)。
+未设置 `DATABASE_URL` 时，控制端会明确警告并使用仅供开发的内存存储，重启后数据消失。正式部署必须配置 PostgreSQL；控制端首次连接时会自动执行事务化迁移。环境变量示例见 [.env.production.example](./.env.production.example)。
 
 首次打开 Web UI 后，选择“首次部署？初始化管理员”。初始化接口只能成功执行一次，密码至少需要 12 个字符。
 
