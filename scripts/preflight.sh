@@ -51,6 +51,13 @@ else
   pass "PostgreSQL password length and character set"
 fi
 
+mfa_key=$(read_env PORTFLOW_MFA_ENCRYPTION_KEY)
+if ! printf '%s' "$mfa_key" | grep -Eq '^[A-Fa-f0-9]{64}$'; then
+  fail "PORTFLOW_MFA_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters"
+else
+  pass "MFA secrets have a dedicated encryption key"
+fi
+
 version=$(read_env PORTFLOW_VERSION)
 if [ -z "$version" ] || [ "$version" = "dev" ]; then
   fail "PORTFLOW_VERSION must be a fixed release version"

@@ -4,7 +4,7 @@
 
 ## 1. 发布前
 
-- 将 `.env.production.example` 复制为权限 `0600` 的 `.env.production`，替换数据库密码、版本、真实域名和通知邮箱；
+- 将 `.env.production.example` 复制为权限 `0600` 的 `.env.production`，替换数据库密码、64 位二次验证加密密钥、版本、真实域名和通知邮箱；
 - 确认 DNS A/AAAA 记录已经指向控制面主机；
 - 运行 `./scripts/preflight.sh .env.production`，所有 `FAIL` 必须清零；
 - CI 或仅渲染配置时可使用 `./scripts/preflight.sh .env.production --offline`；正式发布前仍必须运行不带 `--offline` 的完整预检；

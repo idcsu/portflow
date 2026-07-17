@@ -93,6 +93,11 @@ func (memory *Memory) UpdateUser(_ context.Context, userID string, update UserUp
 	if update.PasswordHash != "" {
 		user.PasswordHash = update.PasswordHash
 	}
+	if update.ResetMFA {
+		user.MFAEnabled = false
+		user.MFASecret = ""
+		user.MFARecoveryHashes = nil
+	}
 	memory.users[userID] = user
 	for tokenHash, session := range memory.sessions {
 		if session.UserID == userID {
@@ -100,6 +105,70 @@ func (memory *Memory) UpdateUser(_ context.Context, userID string, update UserUp
 		}
 	}
 	return user, nil
+}
+
+func (memory *Memory) DeleteUser(_ context.Context, userID string) error {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	user, exists := memory.users[userID]
+	if !exists {
+		return ErrNotFound
+	}
+	if user.Role == RoleAdmin && !user.Disabled {
+		activeAdministrators := 0
+		for _, candidate := range memory.users {
+			if candidate.Role == RoleAdmin && !candidate.Disabled {
+				activeAdministrators++
+			}
+		}
+		if activeAdministrators <= 1 {
+			return ErrLastAdministrator
+		}
+	}
+	delete(memory.users, userID)
+	delete(memory.usernames, user.Username)
+	for tokenHash, token := range memory.enrollmentTokens {
+		if token.CreatedBy == userID {
+			delete(memory.enrollmentTokens, tokenHash)
+		}
+	}
+	for tokenHash, session := range memory.sessions {
+		if session.UserID == userID {
+			delete(memory.sessions, tokenHash)
+		}
+	}
+	return nil
+}
+
+func (memory *Memory) SetUserMFA(_ context.Context, userID string, enabled bool, secret string, recoveryHashes []string) (User, error) {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	user, exists := memory.users[userID]
+	if !exists {
+		return User{}, ErrNotFound
+	}
+	user.MFAEnabled = enabled
+	user.MFASecret = secret
+	user.MFARecoveryHashes = append([]string(nil), recoveryHashes...)
+	memory.users[userID] = user
+	return user, nil
+}
+
+func (memory *Memory) ConsumeRecoveryCode(_ context.Context, userID, hash string) (bool, error) {
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	user, exists := memory.users[userID]
+	if !exists {
+		return false, ErrNotFound
+	}
+	for index, candidate := range user.MFARecoveryHashes {
+		if candidate == hash {
+			user.MFARecoveryHashes = append(user.MFARecoveryHashes[:index], user.MFARecoveryHashes[index+1:]...)
+			memory.users[userID] = user
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (memory *Memory) ListUsers(_ context.Context) ([]User, error) {

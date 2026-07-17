@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # PortFlow 中文交互式控制面管理器。
 # 系统级安装和防火墙变更必须先说明原因、影响与恢复方式，再获得明确确认。
 
-PROGRAM_VERSION="1.0.4"
+PROGRAM_VERSION="1.1.0"
 INSTALL_ROOT="${PORTFLOW_INSTALL_ROOT:-/opt/portflow}"
 RELEASES_DIR="$INSTALL_ROOT/releases"
 SHARED_DIR="$INSTALL_ROOT/shared"
@@ -67,7 +67,7 @@ PortFlow 中文部署管理器
 
 选项：
   --repo OWNER/REPO                 GitHub 仓库，例如 acme/portflow
-  --version VERSION                 发布版本，例如 1.0.4（对应标签 v1.0.4）
+  --version VERSION                 发布版本，例如 1.1.0（对应标签 v1.1.0）
   --tag TAG                         直接指定 Git 标签
   --source DIRECTORY                从本地源码目录安装，用于开发或离线部署
   --control-url URL                 Agent 注册使用的控制面 HTTPS 地址
@@ -555,7 +555,7 @@ write_manager_config() {
 }
 
 write_initial_env() {
-  local version="$1" domain email http_port https_port password
+  local version="$1" domain email http_port https_port password mfa_key
   while true; do
     domain=$(prompt "控制面域名（DNS 需已指向本机）" "")
     validate_domain "$domain" && break
@@ -577,11 +577,13 @@ write_initial_env() {
     warning "端口必须有效且不能与 HTTP 端口相同"
   done
   password=$(generate_password)
+  mfa_key=$(generate_password)
   umask 077
   {
     printf 'POSTGRES_PASSWORD=%s\n' "$password"
     printf 'PORTFLOW_VERSION=%s\n' "$version"
     printf 'PORTFLOW_SECURE_COOKIES=true\n'
+    printf 'PORTFLOW_MFA_ENCRYPTION_KEY=%s\n' "$mfa_key"
     printf 'PORTFLOW_SITE_ADDRESS=%s\n' "$domain"
     printf 'CADDY_EMAIL=%s\n' "$email"
     printf 'PORTFLOW_HTTP_BIND=%s\n' "$http_port"
@@ -589,6 +591,19 @@ write_initial_env() {
   } > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   unset password
+  unset mfa_key
+}
+
+ensure_mfa_key() {
+  local key
+  key=$(env_value PORTFLOW_MFA_ENCRYPTION_KEY)
+  if [[ "$key" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    return 0
+  fi
+  key=$(generate_password)
+  set_env_value PORTFLOW_MFA_ENCRYPTION_KEY "$key"
+  unset key
+  info "已为二次验证生成独立加密密钥，并安全写入现有配置"
 }
 
 prepare_directories() {
@@ -763,6 +778,7 @@ install_control() {
   version="${tag#v}"
   prepare_directories
   if [ ! -f "$ENV_FILE" ]; then write_initial_env "$version"; fi
+  ensure_mfa_key
   show_control_network_notice
   release_dir=$(acquire_release "$repository" "$tag" "$SOURCE_DIR_ARG")
   switch_current "$release_dir"
@@ -816,6 +832,7 @@ update_control() {
   new_release=$(acquire_release "$repository" "$new_tag" "$SOURCE_DIR_ARG")
   switch_current "$new_release"
   set_env_value PORTFLOW_VERSION "$version"
+  ensure_mfa_key
   write_manager_config "$repository" "$new_tag"
   if deploy_current; then
     success "PortFlow 已更新到 $version"

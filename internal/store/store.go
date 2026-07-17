@@ -30,18 +30,22 @@ const (
 )
 
 type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
-	Role         Role      `json:"role"`
-	Disabled     bool      `json:"disabled"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID                string    `json:"id"`
+	Username          string    `json:"username"`
+	PasswordHash      string    `json:"-"`
+	Role              Role      `json:"role"`
+	Disabled          bool      `json:"disabled"`
+	MFAEnabled        bool      `json:"mfaEnabled"`
+	MFASecret         string    `json:"-"`
+	MFARecoveryHashes []string  `json:"-"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type UserUpdate struct {
 	Role         Role
 	Disabled     bool
 	PasswordHash string
+	ResetMFA     bool
 }
 
 type Session struct {
@@ -190,6 +194,9 @@ type Store interface {
 	CreateInitialUser(context.Context, User) error
 	CreateUser(context.Context, User) error
 	UpdateUser(context.Context, string, UserUpdate) (User, error)
+	DeleteUser(context.Context, string) error
+	SetUserMFA(context.Context, string, bool, string, []string) (User, error)
+	ConsumeRecoveryCode(context.Context, string, string) (bool, error)
 	ListUsers(context.Context) ([]User, error)
 	UserByUsername(context.Context, string) (User, error)
 	UserByID(context.Context, string) (User, error)

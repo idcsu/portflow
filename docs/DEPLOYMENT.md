@@ -41,6 +41,7 @@ chmod 600 .env.production
 编辑 `.env.production`：
 
 - `POSTGRES_PASSWORD`：至少 32 位随机值，建议仅使用十六进制字符，避免 URL 转义问题；
+- `PORTFLOW_MFA_ENCRYPTION_KEY`：恰好 64 位十六进制字符，用于加密数据库中的 TOTP 密钥；生成后必须稳定保存，不能随版本更新轮换；
 - `PORTFLOW_VERSION`：当前发布版本；
 - `PORTFLOW_SITE_ADDRESS`：例如 `panel.example.com`；
 - `CADDY_EMAIL`：用于 HTTPS 证书通知；
@@ -92,9 +93,9 @@ curl --fail --show-error https://panel.example.com/api/v1/health
 在开发机或构建机上构建指定版本：
 
 ```bash
-make build VERSION=1.0.4
+make build VERSION=1.1.0
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -buildvcs=false -trimpath \
-  -ldflags "-s -w -X main.agentVersion=1.0.4" \
+  -ldflags "-s -w -X main.agentVersion=1.1.0" \
   -o bin/portflow-agent-linux-arm64 ./cmd/agent
 ```
 

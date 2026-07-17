@@ -41,6 +41,7 @@ services:
     environment:
       DATABASE_URL: postgres://portflow:${POSTGRES_PASSWORD}@postgres:5432/portflow?sslmode=disable
       PORTFLOW_SECURE_COOKIES: ${PORTFLOW_SECURE_COOKIES:-true}
+      PORTFLOW_MFA_ENCRYPTION_KEY: ${PORTFLOW_MFA_ENCRYPTION_KEY:?set PORTFLOW_MFA_ENCRYPTION_KEY in .env.production}
     depends_on:
       postgres:
         condition: service_healthy

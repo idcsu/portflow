@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"portflow/internal/auth"
 	"portflow/internal/store"
 )
 
@@ -75,6 +76,63 @@ func TestHealthReportsStorageFailure(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || responseObject(t, response)["status"] != "degraded" {
 		t.Fatalf("unexpected degraded health response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSetupStatusAndTOTPLoginFlow(t *testing.T) {
+	fixed := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
+	handler := NewServer(Options{Build: BuildInfo{Version: "test"}, Store: store.NewMemory(), MFAEncryptionKey: bytes.Repeat([]byte{4}, 32), Now: func() time.Time { return fixed }})
+	status := requestJSON(t, handler, http.MethodGet, "/api/v1/setup/status", nil, nil)
+	if status.Code != http.StatusOK || responseObject(t, status)["required"] != true {
+		t.Fatalf("unexpected initial setup status: %d %s", status.Code, status.Body.String())
+	}
+	setup := requestJSON(t, handler, http.MethodPost, "/api/v1/setup/admin", map[string]string{"username": "operator", "password": "a-long-test-password"}, nil)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup status=%d body=%s", setup.Code, setup.Body.String())
+	}
+	status = requestJSON(t, handler, http.MethodGet, "/api/v1/setup/status", nil, nil)
+	if responseObject(t, status)["required"] != false {
+		t.Fatal("setup should no longer be offered")
+	}
+	login := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": "", "recoveryCode": ""}, nil)
+	cookie := login.Result().Cookies()[0]
+	start := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/mfa/setup", map[string]string{"password": "a-long-test-password"}, cookie)
+	if start.Code != http.StatusOK {
+		t.Fatalf("MFA setup status=%d body=%s", start.Code, start.Body.String())
+	}
+	secret := responseObject(t, start)["secret"].(string)
+	code, err := auth.TOTPCode(secret, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enable := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/mfa/enable", map[string]string{"password": "a-long-test-password", "code": code}, cookie)
+	if enable.Code != http.StatusOK {
+		t.Fatalf("MFA enable status=%d body=%s", enable.Code, enable.Body.String())
+	}
+	recoveryCodes := responseObject(t, enable)["recoveryCodes"].([]interface{})
+	challenge := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": "", "recoveryCode": ""}, nil)
+	if challenge.Code != http.StatusAccepted || responseObject(t, challenge)["mfaRequired"] != true || len(challenge.Result().Cookies()) != 0 {
+		t.Fatalf("unexpected MFA challenge: %d %s", challenge.Code, challenge.Body.String())
+	}
+	verified := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": code, "recoveryCode": ""}, nil)
+	if verified.Code != http.StatusOK || responseObject(t, verified)["user"].(map[string]interface{})["mfaEnabled"] != true {
+		t.Fatalf("TOTP login status=%d body=%s", verified.Code, verified.Body.String())
+	}
+	recovered := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": "", "recoveryCode": recoveryCodes[0].(string)}, nil)
+	if recovered.Code != http.StatusOK {
+		t.Fatalf("recovery login status=%d body=%s", recovered.Code, recovered.Body.String())
+	}
+	reused := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": "", "recoveryCode": recoveryCodes[0].(string)}, nil)
+	if reused.Code != http.StatusUnauthorized {
+		t.Fatalf("reused recovery code status=%d", reused.Code)
+	}
+	disabled := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/mfa/disable", map[string]string{"password": "a-long-test-password", "code": "", "recoveryCode": recoveryCodes[1].(string)}, recovered.Result().Cookies()[0])
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("MFA disable status=%d body=%s", disabled.Code, disabled.Body.String())
+	}
+	passwordOnly := requestJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "operator", "password": "a-long-test-password", "code": "", "recoveryCode": ""}, nil)
+	if passwordOnly.Code != http.StatusOK || responseObject(t, passwordOnly)["user"].(map[string]interface{})["mfaEnabled"] != false {
+		t.Fatalf("password-only login after disable status=%d body=%s", passwordOnly.Code, passwordOnly.Body.String())
 	}
 }
 
@@ -157,6 +215,14 @@ func TestAdministratorManagesMembersAndRevokesTheirSessions(t *testing.T) {
 	}, administratorCookie)
 	if selfUpdate.Code != http.StatusConflict {
 		t.Fatalf("self update status=%d body=%s", selfUpdate.Code, selfUpdate.Body.String())
+	}
+	deleted := requestJSON(t, handler, http.MethodDelete, "/api/v1/users/"+memberID, nil, administratorCookie)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete member status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	list = requestJSON(t, handler, http.MethodGet, "/api/v1/users", nil, administratorCookie)
+	if list.Code != http.StatusOK || len(responseObject(t, list)["items"].([]interface{})) != 1 {
+		t.Fatalf("list after delete status=%d body=%s", list.Code, list.Body.String())
 	}
 }
 

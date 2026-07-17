@@ -8,9 +8,11 @@ import {
   ChevronDown,
   CheckCircle2,
   CircleDot,
+  Copy,
   Gauge,
   LayoutDashboard,
   ListChecks,
+  KeyRound,
   LogOut,
   Menu,
   Moon,
@@ -21,6 +23,7 @@ import {
   ShieldCheck,
   Sun,
   TerminalSquare,
+  Trash2,
   Users,
   X,
 } from 'lucide-react'
@@ -34,7 +37,7 @@ type Summary = {
   source?: string
 }
 
-type User = { id: string; username: string; role: 'admin' | 'member'; disabled: boolean; createdAt: string }
+type User = { id: string; username: string; role: 'admin' | 'member'; disabled: boolean; mfaEnabled: boolean; createdAt: string }
 type MemberItem = User
 type NodeItem = { id: string; name: string; region: string; publicIp: string; tunnelAddress?: string; status: 'online' | 'offline' | 'disabled'; architecture: string; agentVersion: string; lastHeartbeat: string; configVersion: number; appliedConfigVersion: number; attemptedConfigVersion: number; lastConfigError?: string; cpuPercent: number; memoryPercent: number; loadOne: number; diskPercent: number; networkRxBps: number; networkTxBps: number; activeConnections: number }
 type ForwardRule = { id: string; name: string; protocol: 'tcp' | 'udp' | 'tcp_udp'; mode: 'direct' | 'relay'; ingressNodeId: string; egressNodeId?: string; listenHost: string; listenPort: number; targetHost: string; targetPort: number; relayHost?: string; relayPort?: number; enabled: boolean; bandwidthKbps: number; maxConnections: number; allowCidrs?: string[]; denyCidrs?: string[]; configVersion: number; egressConfigVersion?: number; activeConnections: number; bytesIn: number; bytesOut: number }
@@ -48,7 +51,7 @@ type AgentLog = { nodeId: string; id: string; level: 'info' | 'warning' | 'error
 type LiveConnection = { nodeId: string; id: string; ruleId: string; protocol: 'tcp' | 'udp'; sourceAddress: string; targetAddress: string; startedAt: string; lastActivity: string; bytesIn: number; bytesOut: number; observedAt: string }
 type SystemSettings = {
   runtime: { version: string; startedAt: string; serverTime: string; uptimeSeconds: number }
-  security: { secureCookies: boolean; httpOnlyCookies: boolean; sameSite: string; sessionTtlSeconds: number; passwordMinLength: number; passwordMaxLength: number; loginFailureLimit: number; loginFailureWindowSeconds: number }
+  security: { secureCookies: boolean; httpOnlyCookies: boolean; sameSite: string; totpMfa: boolean; sessionTtlSeconds: number; passwordMinLength: number; passwordMaxLength: number; loginFailureLimit: number; loginFailureWindowSeconds: number }
   agents: { heartbeatIntervalSeconds: number; offlineAfterSeconds: number; maxConnectionsPerHeartbeat: number; maxLogsPerHeartbeat: number; maxStoredConnectionsPerNode: number }
   retention: { nodeMetricsDays: number; agentLogsDays: number; auditEventsAutoCleanup: boolean; activeConnectionsMode: string }
   deployment: { ready: boolean; storageMode: string; httpsObserved: boolean; activeAdministrators: number; checks: Array<{ id: string; label: string; status: 'pass' | 'fail'; detail: string }> }
@@ -65,7 +68,7 @@ const fallbackSummary: Summary = {
 }
 
 const emptyTraffic: TrafficHistory = { from: '', to: '', intervalSeconds: 1800, uploadBytes: 0, downloadBytes: 0, points: [] }
-const installerVersion = '1.0.4'
+const installerVersion = '1.1.0'
 const installerRepository = 'idcsu/portflow'
 
 function shellQuote(value: string) {
@@ -102,9 +105,55 @@ function auditActionLabel(action: string) {
     'user.bootstrap': '初始化管理员', 'auth.login': '用户登录', 'auth.login_failed': '登录失败',
     'auth.logout': '用户退出', 'enrollment_token.create': '创建注册令牌', 'agent.enroll': '节点注册',
     'forward_rule.create': '创建转发线路', 'forward_rule.update': '修改转发线路', 'forward_rule.delete': '删除转发线路',
-    'user.create': '创建成员', 'user.update': '修改成员权限',
+    'user.create': '创建成员', 'user.update': '修改成员权限', 'user.delete': '删除成员',
+    'auth.mfa_setup': '开始设置二次验证', 'auth.mfa_enable': '启用二次验证',
+    'auth.mfa_disable': '关闭二次验证', 'auth.mfa_failed': '二次验证码错误',
   }
   return labels[action] ?? action
+}
+
+function auditCategory(action: string) {
+  if (action.startsWith('auth.')) return 'security'
+  if (action.startsWith('user.')) return 'members'
+  if (action.startsWith('agent.') || action.startsWith('enrollment_token.')) return 'nodes'
+  if (action.startsWith('forward_rule.')) return 'rules'
+  return 'other'
+}
+
+function auditTypeLabel(value: string) {
+  return ({ user: '成员账号', anonymous: '未登录访问', agent: '节点程序', session: '登录会话', node: '节点', forward_rule: '转发线路', enrollment_token: '节点注册令牌' } as Record<string, string>)[value] ?? '系统对象'
+}
+
+function auditDetailsLabel(details?: Record<string, unknown>) {
+  if (!details || Object.keys(details).length === 0) return '没有附加信息'
+  const labels: Record<string, string> = { username: '用户名', role: '新角色', previousRole: '原角色', disabled: '是否禁用', previousDisabled: '原禁用状态', passwordReset: '已重置密码', mfaReset: '已重置二次验证', name: '名称' }
+  return Object.entries(details).map(([key, value]) => `${labels[key] ?? key}：${value === true ? '是' : value === false ? '否' : String(value)}`).join('；')
+}
+
+function logComponentLabel(component: string) {
+  const normalized = component.toLowerCase()
+  if (normalized.includes('forward') || normalized.includes('tcp') || normalized.includes('udp')) return '转发引擎'
+  if (normalized.includes('config')) return '配置同步'
+  if (normalized.includes('heartbeat') || normalized.includes('control')) return '控制面连接'
+  if (normalized.includes('agent')) return '节点服务'
+  return component || '节点服务'
+}
+
+function friendlyError(body: any, fallback: string) {
+  const code = body?.error?.code
+  const labels: Record<string, string> = {
+    invalid_credentials: '用户名或密码不正确', login_rate_limited: '登录失败次数过多，请 15 分钟后再试',
+    invalid_mfa_code: '验证码不正确或已过期，请输入验证器里最新的 6 位数字', invalid_password: '当前密码不正确',
+    last_administrator: '必须至少保留一个启用中的管理员', self_modification: '不能在成员列表修改或删除当前登录账号',
+    username_conflict: '这个用户名已经存在', setup_completed: '管理员已经初始化，请直接登录',
+    permission_denied: '当前账号没有执行这项操作的权限', authentication_required: '登录已经过期，请重新登录', invalid_session: '登录已经过期，请重新登录',
+    invalid_name: '名称不能为空，且不能超过 80 个字符', invalid_role: '请选择管理员或普通成员',
+    invalid_rule: '线路配置不完整或数值超出允许范围，请检查标红项目', invalid_listen_host: '监听地址格式不正确', invalid_target_host: '目标地址格式不正确',
+    listener_conflict: '所选节点上的监听地址、端口和协议已被另一条线路使用', relay_not_provisioned: '入口或出口节点尚未配置加密隧道地址，暂时不能启用',
+    sensitive_target: '为防止访问云平台敏感地址，目标地址已被安全策略拒绝', unsupported_rule: '当前节点版本暂不支持这项线路配置',
+    invalid_expiration: '有效期必须在 5 到 1440 分钟之间', mfa_already_enabled: '二次验证已经开启，如需重新绑定请先关闭', mfa_setup_required: '请先开始二次验证设置',
+  }
+  return labels[code] ?? body?.error?.message ?? fallback
 }
 
 const emptyRuleForm = (): RuleForm => ({ name: '', protocol: 'tcp', mode: 'direct', ingressNodeId: '', egressNodeId: '', listenHost: '0.0.0.0', listenPort: '', targetHost: '', targetPort: '', relayPort: '', bandwidthKbps: '0', maxConnections: '0', allowCidrs: '', denyCidrs: '', enabled: true })
@@ -153,10 +202,20 @@ function ResourceSparkline({ points }: { points: NodeMetricPoint[] }) {
 
 function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [setup, setSetup] = useState(false)
+  const [setupRequired, setSetupRequired] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [mfaRequired, setMfaRequired] = useState(false)
+  const [mfaCode, setMfaCode] = useState('')
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    fetch('/api/v1/setup/status').then((response) => response.ok ? response.json() : Promise.reject())
+      .then((body) => { setSetupRequired(Boolean(body.required)); setSetup(Boolean(body.required)) })
+      .catch(() => setSetupRequired(false))
+  }, [])
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -168,13 +227,20 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: User) => voi
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
         })
         const setupBody = await setupResponse.json()
-        if (!setupResponse.ok) throw new Error(setupBody.error?.message ?? '初始化失败')
+        if (!setupResponse.ok) throw new Error(friendlyError(setupBody, '初始化失败'))
+        setSetupRequired(false)
+        setSetup(false)
       }
       const response = await fetch('/api/v1/auth/login', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, code: useRecoveryCode ? '' : mfaCode, recoveryCode: useRecoveryCode ? mfaCode : '' }),
       })
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '登录失败')
+      if (response.status === 202 && body.mfaRequired) {
+        setMfaRequired(true)
+        setMfaCode('')
+        return
+      }
+      if (!response.ok) throw new Error(friendlyError(body, '登录失败'))
       onAuthenticated(body.user as User)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '请求失败，请稍后重试')
@@ -187,14 +253,17 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: User) => voi
     <div className="auth-ambient ambient-one" /><div className="auth-ambient ambient-two" />
     <section className="auth-card">
       <div className="auth-brand"><div className="brand-mark"><CircleDot size={22} /></div><div><b>PortFlow</b><span>网络控制台</span></div></div>
-      <div className="auth-heading"><p>{setup ? 'FIRST RUN SETUP' : 'SECURE ACCESS'}</p><h1>{setup ? '初始化管理员' : '欢迎回来'}</h1><span>{setup ? '仅在系统尚无用户时可执行一次。' : '登录后管理节点、线路与实时状态。'}</span></div>
+      <div className="auth-heading"><p>{setup ? '首次使用设置' : mfaRequired ? '二次身份验证' : '安全登录'}</p><h1>{setup ? '初始化管理员' : mfaRequired ? '确认是你本人' : '欢迎回来'}</h1><span>{setup ? '创建系统中的第一个管理员账号，这个步骤只会出现一次。' : mfaRequired ? '打开手机验证器，输入 PortFlow 对应的最新验证码。' : '登录后管理节点、线路与实时状态。'}</span></div>
       <form onSubmit={submit}>
-        <label><span>用户名</span><input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="operator" required /></label>
-        <label><span>密码</span><input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" minLength={12} required /></label>
+        {!mfaRequired && <><label><span>用户名</span><input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="operator" required /></label>
+        <label><span>密码</span><input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" minLength={12} required /></label></>}
+        {mfaRequired && <label><span>{useRecoveryCode ? '一次性恢复码' : '6 位动态验证码'}</span><input className="otp-input" inputMode={useRecoveryCode ? 'text' : 'numeric'} autoComplete="one-time-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} placeholder={useRecoveryCode ? 'XXXX-XXXX-XXXX' : '000000'} minLength={6} required autoFocus /></label>}
         {error && <div className="auth-error">{error}</div>}
-        <button className="auth-submit" disabled={busy}>{busy ? '正在验证…' : setup ? '初始化并登录' : '安全登录'}</button>
+        <button className="auth-submit" disabled={busy}>{busy ? '正在验证…' : setup ? '初始化并登录' : mfaRequired ? '验证并进入控制台' : '安全登录'}</button>
       </form>
-      <button className="auth-switch" onClick={() => { setSetup(!setup); setError('') }}>{setup ? '已有管理员？返回登录' : '首次部署？初始化管理员'}</button>
+      {mfaRequired && <button className="auth-switch" onClick={() => { setUseRecoveryCode(!useRecoveryCode); setMfaCode(''); setError('') }}>{useRecoveryCode ? '使用手机验证器' : '手机不在身边？使用恢复码'}</button>}
+      {mfaRequired && <button className="auth-switch subtle" onClick={() => { setMfaRequired(false); setMfaCode(''); setError('') }}>返回账号密码登录</button>}
+      {!mfaRequired && setupRequired && <button className="auth-switch" onClick={() => { setSetup(!setup); setError('') }}>{setup ? '已有管理员？返回登录' : '首次部署？初始化管理员'}</button>}
       <div className="auth-foot"><ShieldCheck size={15} /><span>会话凭证仅保存在 HttpOnly Cookie 中</span></div>
     </section>
   </main>
@@ -208,6 +277,7 @@ function App() {
   const [auditNextBefore, setAuditNextBefore] = useState<string | null>(null)
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState('')
+  const [auditCategoryFilter, setAuditCategoryFilter] = useState('all')
   const [logItems, setLogItems] = useState<AgentLog[]>([])
   const [logNextBefore, setLogNextBefore] = useState<string | null>(null)
   const [logNodeFilter, setLogNodeFilter] = useState('')
@@ -228,6 +298,7 @@ function App() {
   const [memberPassword, setMemberPassword] = useState('')
   const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member')
   const [memberDisabled, setMemberDisabled] = useState(false)
+  const [memberResetMFA, setMemberResetMFA] = useState(false)
   const [savingMember, setSavingMember] = useState(false)
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null)
   const [settingsLoading, setSettingsLoading] = useState(false)
@@ -235,6 +306,15 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [showSecurity, setShowSecurity] = useState(false)
+  const [securityPassword, setSecurityPassword] = useState('')
+  const [securityCode, setSecurityCode] = useState('')
+  const [securityUseRecovery, setSecurityUseRecovery] = useState(false)
+  const [securitySecret, setSecuritySecret] = useState('')
+  const [securityURI, setSecurityURI] = useState('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([])
+  const [securityBusy, setSecurityBusy] = useState(false)
+  const [securityError, setSecurityError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem('portflow-theme') === 'dark' ? 'dark' : 'light')
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -257,6 +337,7 @@ function App() {
   const [ruleItems, setRuleItems] = useState<ForwardRule[]>([])
   const [showRuleEditor, setShowRuleEditor] = useState(false)
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
+  const [copyingRule, setCopyingRule] = useState(false)
   const [ruleForm, setRuleForm] = useState<RuleForm>(emptyRuleForm)
   const [ruleError, setRuleError] = useState('')
   const [savingRule, setSavingRule] = useState(false)
@@ -290,7 +371,7 @@ function App() {
     try {
       const response = await fetch(`/api/v1/nodes/${encodeURIComponent(nodeId)}?hours=${hours}`)
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取节点详情')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取节点详情'))
       setNodeDetail({ ...body, rules: body.rules ?? [], points: body.points ?? [] } as NodeDetail)
     } catch (reason) {
       setNodeDetailError(reason instanceof Error ? reason.message : '无法读取节点详情')
@@ -313,7 +394,7 @@ function App() {
       if (before) query.set('before', before)
       const response = await fetch(`/api/v1/audit-events?${query}`)
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取审计记录')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取审计记录'))
       setAuditItems((current) => append ? [...current, ...(body.items ?? [])] : (body.items ?? []))
       setAuditNextBefore(body.nextBefore ?? null)
     } catch (reason) {
@@ -333,7 +414,7 @@ function App() {
       if (logLevelFilter) query.set('level', logLevelFilter)
       const response = await fetch(`/api/v1/agent-logs?${query}`)
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取运行日志')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取运行日志'))
       setLogItems((current) => append ? [...current, ...(body.items ?? [])] : (body.items ?? []))
       setLogNextBefore(body.nextBefore ?? null)
     } catch (reason) {
@@ -349,7 +430,7 @@ function App() {
     try {
       const response = await fetch('/api/v1/connections')
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取实时连接')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取实时连接'))
       setConnectionItems(body.items ?? [])
     } catch (reason) {
       setConnectionError(reason instanceof Error ? reason.message : '无法读取实时连接')
@@ -364,7 +445,7 @@ function App() {
     try {
       const response = await fetch('/api/v1/users')
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取成员')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取成员'))
       setMemberItems(body.items ?? [])
     } catch (reason) {
       setMemberError(reason instanceof Error ? reason.message : '无法读取成员')
@@ -379,7 +460,7 @@ function App() {
     try {
       const response = await fetch('/api/v1/system/settings')
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法读取系统设置')
+      if (!response.ok) throw new Error(friendlyError(body, '无法读取系统设置'))
       setSystemSettings(body as SystemSettings)
     } catch (reason) {
       setSettingsError(reason instanceof Error ? reason.message : '无法读取系统设置')
@@ -482,7 +563,7 @@ function App() {
         body: JSON.stringify({ name: enrollmentName, expiresInMinutes: 30 }),
       })
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法创建注册令牌')
+      if (!response.ok) throw new Error(friendlyError(body, '无法创建注册令牌'))
       setEnrollmentToken(body.token)
     } catch (reason) {
       setEnrollmentError(reason instanceof Error ? reason.message : '无法创建注册令牌')
@@ -503,6 +584,7 @@ function App() {
 
   function openCreateRule() {
     setEditingRuleId(null)
+    setCopyingRule(false)
     setRuleForm({ ...emptyRuleForm(), ingressNodeId: nodeItems.find((node) => node.status !== 'disabled')?.id ?? '' })
     setRuleError('')
     setShowRuleEditor(true)
@@ -510,6 +592,7 @@ function App() {
 
   function openEditRule(rule: ForwardRule) {
     setEditingRuleId(rule.id)
+    setCopyingRule(false)
     setRuleForm({
       name: rule.name, protocol: rule.protocol, mode: rule.mode, ingressNodeId: rule.ingressNodeId, egressNodeId: rule.egressNodeId ?? '', listenHost: rule.listenHost,
       listenPort: String(rule.listenPort), targetHost: rule.targetHost, targetPort: String(rule.targetPort), relayPort: rule.relayPort ? String(rule.relayPort) : '',
@@ -522,6 +605,7 @@ function App() {
 
   function openCopyRule(rule: ForwardRule) {
     setEditingRuleId(null)
+    setCopyingRule(true)
     setRuleForm({
       name: `${rule.name} 副本`, protocol: rule.protocol, mode: rule.mode, ingressNodeId: rule.ingressNodeId, egressNodeId: rule.egressNodeId ?? '',
       listenHost: rule.listenHost, listenPort: '', targetHost: rule.targetHost, targetPort: String(rule.targetPort), relayPort: '',
@@ -535,6 +619,7 @@ function App() {
   function closeRuleEditor() {
     setShowRuleEditor(false)
     setEditingRuleId(null)
+    setCopyingRule(false)
     setRuleError('')
   }
 
@@ -555,7 +640,7 @@ function App() {
         method: editingRuleId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       })
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法保存转发线路')
+      if (!response.ok) throw new Error(friendlyError(body, '无法保存转发线路'))
       closeRuleEditor()
       await loadControlData()
     } catch (reason) {
@@ -582,6 +667,7 @@ function App() {
     setMemberPassword('')
     setMemberRole('member')
     setMemberDisabled(false)
+    setMemberResetMFA(false)
     setMemberError('')
     setShowMemberEditor(true)
   }
@@ -592,6 +678,7 @@ function App() {
     setMemberPassword('')
     setMemberRole(member.role)
     setMemberDisabled(member.disabled)
+    setMemberResetMFA(false)
     setMemberError('')
     setShowMemberEditor(true)
   }
@@ -600,6 +687,7 @@ function App() {
     setShowMemberEditor(false)
     setEditingMemberId(null)
     setMemberPassword('')
+    setMemberResetMFA(false)
     setMemberError('')
   }
 
@@ -612,17 +700,106 @@ function App() {
       const response = await fetch(editing ? `/api/v1/users/${editingMemberId}` : '/api/v1/users', {
         method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editing
-          ? { role: memberRole, disabled: memberDisabled, password: memberPassword }
+          ? { role: memberRole, disabled: memberDisabled, password: memberPassword, resetMfa: memberResetMFA }
           : { username: memberUsername, password: memberPassword, role: memberRole }),
       })
       const body = await response.json()
-      if (!response.ok) throw new Error(body.error?.message ?? '无法保存成员')
+      if (!response.ok) throw new Error(friendlyError(body, '无法保存成员'))
       closeMemberEditor()
       await loadMembers()
     } catch (reason) {
       setMemberError(reason instanceof Error ? reason.message : '无法保存成员')
     } finally {
       setSavingMember(false)
+    }
+  }
+
+  async function deleteMember(member: MemberItem) {
+    if (!window.confirm(`确认永久删除成员“${member.username}”？该成员会立即退出登录，且此操作无法撤销。`)) return
+    const response = await fetch(`/api/v1/users/${member.id}`, { method: 'DELETE' })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      window.alert(friendlyError(body, '删除成员失败'))
+      return
+    }
+    await loadMembers()
+  }
+
+  function openSecurityCenter() {
+    setAccountMenuOpen(false)
+    setSecurityPassword('')
+    setSecurityCode('')
+    setSecurityUseRecovery(false)
+    setSecuritySecret('')
+    setSecurityURI('')
+    setRecoveryCodes([])
+    setSecurityError('')
+    setShowSecurity(true)
+  }
+
+  function closeSecurityCenter() {
+    setShowSecurity(false)
+    setSecurityPassword('')
+    setSecurityCode('')
+    setSecurityUseRecovery(false)
+    setSecuritySecret('')
+    setSecurityURI('')
+    setRecoveryCodes([])
+    setSecurityError('')
+  }
+
+  async function startMFASetup(event: React.FormEvent) {
+    event.preventDefault()
+    setSecurityBusy(true)
+    setSecurityError('')
+    try {
+      const response = await fetch('/api/v1/auth/mfa/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: securityPassword }) })
+      const body = await response.json()
+      if (!response.ok) throw new Error(friendlyError(body, '无法开始设置二次验证'))
+      setSecuritySecret(body.secret)
+      setSecurityURI(body.otpauthUrl)
+      setSecurityCode('')
+    } catch (reason) {
+      setSecurityError(reason instanceof Error ? reason.message : '无法开始设置二次验证')
+    } finally {
+      setSecurityBusy(false)
+    }
+  }
+
+  async function enableMFA(event: React.FormEvent) {
+    event.preventDefault()
+    setSecurityBusy(true)
+    setSecurityError('')
+    try {
+      const response = await fetch('/api/v1/auth/mfa/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: securityPassword, code: securityCode }) })
+      const body = await response.json()
+      if (!response.ok) throw new Error(friendlyError(body, '无法启用二次验证'))
+      setRecoveryCodes(body.recoveryCodes ?? [])
+      setUser((current) => current ? { ...current, mfaEnabled: true } : current)
+      setSecuritySecret('')
+      setSecurityURI('')
+      setSecurityCode('')
+    } catch (reason) {
+      setSecurityError(reason instanceof Error ? reason.message : '无法启用二次验证')
+    } finally {
+      setSecurityBusy(false)
+    }
+  }
+
+  async function disableMFA(event: React.FormEvent) {
+    event.preventDefault()
+    setSecurityBusy(true)
+    setSecurityError('')
+    try {
+      const response = await fetch('/api/v1/auth/mfa/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: securityPassword, code: securityUseRecovery ? '' : securityCode, recoveryCode: securityUseRecovery ? securityCode : '' }) })
+      const body = await response.json()
+      if (!response.ok) throw new Error(friendlyError(body, '无法关闭二次验证'))
+      setUser((current) => current ? { ...current, mfaEnabled: false } : current)
+      closeSecurityCenter()
+    } catch (reason) {
+      setSecurityError(reason instanceof Error ? reason.message : '无法关闭二次验证')
+    } finally {
+      setSecurityBusy(false)
     }
   }
 
@@ -658,6 +835,7 @@ function App() {
   const filteredConnections = connectionItems.filter((connection) =>
     (!connectionNodeFilter || connection.nodeId === connectionNodeFilter) &&
     (!connectionProtocolFilter || connection.protocol === connectionProtocolFilter))
+  const filteredAuditItems = auditItems.filter((event) => auditCategoryFilter === 'all' || auditCategory(event.action) === auditCategoryFilter)
 
   const nav = [
     { label: '概览', icon: LayoutDashboard, view: 'dashboard' as View },
@@ -728,7 +906,7 @@ function App() {
             <div className="divider" />
             <div className="top-action-shell">
               <button className={accountMenuOpen ? 'profile active' : 'profile'} onClick={() => { setAccountMenuOpen(!accountMenuOpen); setNotificationOpen(false) }} aria-label="打开账户菜单" aria-expanded={accountMenuOpen}><span className="avatar">{user.username.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{user.username}</b><small>{user.role === 'admin' ? '管理员' : '普通成员'}</small></span><ChevronDown size={16} /></button>
-              {accountMenuOpen && <div className="top-popover account-popover"><div className="account-summary"><span className="avatar large">{user.username.slice(0, 1).toUpperCase()}</span><span><b>{user.username}</b><small>{user.role === 'admin' ? '管理员账户' : '普通成员账户'}</small></span></div><button className="account-action" onClick={() => void logout()}><LogOut size={16} /><span>退出登录</span></button></div>}
+              {accountMenuOpen && <div className="top-popover account-popover"><div className="account-summary"><span className="avatar large">{user.username.slice(0, 1).toUpperCase()}</span><span><b>{user.username}</b><small>{user.role === 'admin' ? '管理员账户' : '普通成员账户'}</small></span></div><button className="account-action" onClick={openSecurityCenter}><KeyRound size={16} /><span>账户安全</span><em>{user.mfaEnabled ? '已开启二次验证' : '建议开启'}</em></button><button className="account-action danger" onClick={() => void logout()}><LogOut size={16} /><span>退出登录</span></button></div>}
             </div>
           </div>
         </header>
@@ -736,7 +914,7 @@ function App() {
         <div className="content">
           {activeView === 'dashboard' && <>
           <section className="page-heading">
-            <div><p className="eyebrow">NETWORK OVERVIEW</p><h1>{summary.nodes.offline || summary.rules.degraded ? '有项目需要关注' : '网络运行平稳'}</h1><p>{summary.nodes.offline || summary.rules.degraded ? `${summary.nodes.offline} 个节点离线，${summary.rules.degraded} 条线路异常。` : '所有已启用线路和在线节点均在预期状态。'}</p></div>
+            <div><p className="eyebrow">网络运行概览</p><h1>{summary.nodes.offline || summary.rules.degraded ? '有项目需要关注' : '网络运行平稳'}</h1><p>{summary.nodes.offline || summary.rules.degraded ? `${summary.nodes.offline} 个节点离线，${summary.rules.degraded} 条线路异常。` : '所有已启用线路和在线节点均在预期状态。'}</p></div>
             <button className="primary-button" onClick={openCreateRule}><Plus size={18} />创建转发线路</button>
           </section>
 
@@ -782,7 +960,7 @@ function App() {
           </>}
           {activeView === 'rules' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">FORWARDING ROUTES</p><h1>转发线路</h1><p>集中创建、复制、编辑和删除线路，并查看 Agent 的实际应用状态。</p></div>
+              <div><p className="eyebrow">转发配置管理</p><h1>转发线路</h1><p>集中创建、复制、编辑和删除线路，并查看节点程序的实际应用状态。</p></div>
               <button className="primary-button" onClick={openCreateRule}><Plus size={18} />创建转发线路</button>
             </section>
             <section className="stat-grid monitoring-stats">
@@ -801,7 +979,7 @@ function App() {
           </>}
           {activeView === 'nodes' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">NODE OPERATIONS</p><h1>节点详情</h1><p>查看节点身份、配置同步状态、关联线路和最长 30 天资源历史。</p></div>
+              <div><p className="eyebrow">服务器节点管理</p><h1>节点详情</h1><p>查看节点身份、配置同步状态、关联线路和最长 30 天资源历史。</p></div>
               {user.role === 'admin' && <button className="primary-button" onClick={() => setShowEnrollment(true)}><Plus size={18} />添加新节点</button>}
             </section>
             <section className="node-detail-layout">
@@ -844,7 +1022,7 @@ function App() {
           </>}
           {activeView === 'connections' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">LIVE CONNECTION SNAPSHOTS</p><h1>实时连接</h1><p>查看 Agent 最近一次心跳中的 TCP 连接与 UDP 会话元数据，不采集转发内容。</p></div>
+              <div><p className="eyebrow">当前连接快照</p><h1>实时连接</h1><p>查看节点程序最近一次上报的 TCP 连接与 UDP 会话信息，不采集转发内容。</p></div>
               <button className="select-button" disabled={connectionLoading} onClick={() => loadConnections()}>{connectionLoading ? '正在刷新…' : '刷新快照'}</button>
             </section>
             <section className="stat-grid monitoring-stats">
@@ -874,7 +1052,7 @@ function App() {
           </>}
           {activeView === 'monitoring' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">MONITORING ANALYTICS</p><h1>监控分析</h1><p>基于 Agent 每分钟心跳快照的最近 24 小时数据。</p></div>
+              <div><p className="eyebrow">资源与流量趋势</p><h1>监控分析</h1><p>基于节点程序每分钟上报数据整理出的最近 24 小时趋势。</p></div>
             </section>
             <section className="stat-grid monitoring-stats">
               <article className="stat-card"><div className="stat-icon mint"><ArrowDownToLine /></div><div className="stat-meta"><span>24 小时下载</span><b>{formatBytes(trafficHistory.downloadBytes)}</b><em>所有节点聚合</em></div></article>
@@ -899,22 +1077,23 @@ function App() {
           </>}
           {activeView === 'audit' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">SECURITY AUDIT</p><h1>操作审计</h1><p>追踪登录、节点注册和转发配置变更。</p></div>
+              <div><p className="eyebrow">安全与操作记录</p><h1>操作审计</h1><p>这里记录“谁在什么时间做了什么”，方便排查误操作和异常登录。</p></div>
               <button className="select-button" disabled={auditLoading} onClick={() => loadAudit()}>{auditLoading ? '正在刷新…' : '刷新记录'}</button>
             </section>
             <section className="panel audit-panel">
-              <div className="panel-heading"><div><h2>最近审计事件</h2><p>仅管理员可查看，按时间倒序排列</p></div><span className="retention-badge">ADMIN ONLY</span></div>
+              <div className="panel-heading"><div><h2>最近操作记录</h2><p>最新记录排在最前面，仅管理员可以查看</p></div><span className="retention-badge">仅管理员</span></div>
+              <div className="category-tabs" role="tablist" aria-label="审计记录分类">{[['all','全部'],['security','登录与安全'],['members','成员权限'],['nodes','节点管理'],['rules','转发线路'],['other','其他']].map(([value,label]) => <button key={value} className={auditCategoryFilter === value ? 'active' : ''} onClick={() => setAuditCategoryFilter(value)}>{label}<span>{value === 'all' ? auditItems.length : auditItems.filter((event) => auditCategory(event.action) === value).length}</span></button>)}</div>
               {auditError && <div className="auth-error audit-error">{auditError}</div>}
-              <div className="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>执行者</th><th>目标</th><th>来源 IP</th><th>详情</th></tr></thead><tbody>
-                {auditItems.map((event) => <tr key={event.id}><td>{new Date(event.createdAt).toLocaleString()}</td><td><b>{auditActionLabel(event.action)}</b><br /><small>{event.action}</small></td><td>{event.actorType}{event.actorId ? ` · ${event.actorId}` : ''}</td><td>{event.targetType}{event.targetId ? ` · ${event.targetId}` : ''}</td><td>{event.remoteIp || '—'}</td><td><code className="audit-details">{event.details && Object.keys(event.details).length ? JSON.stringify(event.details) : '—'}</code></td></tr>)}
+              <div className="table-wrap"><table><thead><tr><th>发生时间</th><th>做了什么</th><th>由谁执行</th><th>影响对象</th><th>来源地址</th><th>补充说明</th></tr></thead><tbody>
+                {filteredAuditItems.map((event) => <tr key={event.id}><td>{new Date(event.createdAt).toLocaleString()}</td><td><b>{auditActionLabel(event.action)}</b><br /><small>{event.action}</small></td><td><b>{auditTypeLabel(event.actorType)}</b>{event.actorId && <small className="block-id">编号：{event.actorId}</small>}</td><td>{auditTypeLabel(event.targetType)}{event.targetId && <small className="block-id">编号：{event.targetId}</small>}</td><td><code>{event.remoteIp || '系统内部'}</code></td><td className="audit-details">{auditDetailsLabel(event.details)}</td></tr>)}
               </tbody></table></div>
-              {auditItems.length === 0 && !auditLoading && !auditError && <div className="empty-state"><ListChecks size={22} /><b>暂无审计记录</b><span>新的安全和配置操作将显示在这里</span></div>}
+              {filteredAuditItems.length === 0 && !auditLoading && !auditError && <div className="empty-state"><ListChecks size={22} /><b>这个分类暂无记录</b><span>新的安全和配置操作会自动保存在这里</span></div>}
               {auditNextBefore && <button className="load-more" disabled={auditLoading} onClick={() => loadAudit(auditNextBefore, true)}>{auditLoading ? '正在读取…' : '加载更早记录'}</button>}
             </section>
           </>}
           {activeView === 'members' && user.role === 'admin' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">TEAM ACCESS CONTROL</p><h1>成员权限</h1><p>管理内部成员角色和登录状态；权限变更会立即撤销目标账号的旧会话。</p></div>
+              <div><p className="eyebrow">团队账号与权限</p><h1>成员权限</h1><p>管理内部成员角色和登录状态；权限变更会立即让目标账号重新登录。</p></div>
               <button className="primary-button" onClick={openCreateMember}><Plus size={18} />添加成员</button>
             </section>
             <section className="stat-grid monitoring-stats">
@@ -926,15 +1105,15 @@ function App() {
             <section className="panel monitoring-table members-panel">
               <div className="panel-heading"><div><h2>团队账号</h2><p>管理员拥有成员、节点注册、中转和审计权限；普通成员可查看状态并管理直连线路</p></div><button className="select-button" disabled={memberLoading} onClick={() => loadMembers()}>{memberLoading ? '正在刷新…' : '刷新列表'}</button></div>
               {memberError && !showMemberEditor && <div className="auth-error audit-error">{memberError}</div>}
-              <div className="table-wrap"><table><thead><tr><th>成员</th><th>角色</th><th>状态</th><th>创建时间</th><th>权限范围</th><th>操作</th></tr></thead><tbody>
-                {memberItems.map((member) => <tr key={member.id}><td><div className="member-name"><span className="avatar">{member.username.slice(0, 1).toUpperCase()}</span><span><b>{member.username}</b><small>{member.id}</small></span></div></td><td><span className={member.role === 'admin' ? 'member-role admin' : 'member-role'}>{member.role === 'admin' ? '管理员' : '普通成员'}</span></td><td><span className={member.disabled ? 'route-state stopped' : 'route-state healthy'}><i />{member.disabled ? '已禁用' : '已启用'}</span></td><td>{new Date(member.createdAt).toLocaleString()}</td><td>{member.role === 'admin' ? '完整管理权限' : '状态查看与直连线路'}</td><td>{member.id === user.id ? <span className="current-account">当前账号</span> : <button className="member-edit-button" onClick={() => openEditMember(member)}>编辑权限</button>}</td></tr>)}
+              <div className="table-wrap"><table><thead><tr><th>成员</th><th>角色</th><th>登录保护</th><th>账号状态</th><th>权限说明</th><th>操作</th></tr></thead><tbody>
+                {memberItems.map((member) => <tr key={member.id}><td><div className="member-name"><span className="avatar">{member.username.slice(0, 1).toUpperCase()}</span><span><b>{member.username}</b><small>创建于 {new Date(member.createdAt).toLocaleDateString()}</small></span></div></td><td><span className={member.role === 'admin' ? 'member-role admin' : 'member-role'}>{member.role === 'admin' ? '管理员' : '普通成员'}</span></td><td><span className={member.mfaEnabled ? 'security-badge enabled' : 'security-badge'}><ShieldCheck size={14} />{member.mfaEnabled ? '已开启二次验证' : '仅密码登录'}</span></td><td><span className={member.disabled ? 'route-state stopped' : 'route-state healthy'}><i />{member.disabled ? '已禁用' : '已启用'}</span></td><td>{member.role === 'admin' ? '可管理成员、节点、线路和安全记录' : '可查看状态并管理单节点直连线路'}</td><td>{member.id === user.id ? <span className="current-account">当前账号请在右上角管理</span> : <div className="member-actions"><button className="member-edit-button" onClick={() => openEditMember(member)}>编辑</button><button className="member-delete-button" onClick={() => void deleteMember(member)}><Trash2 size={14} />删除</button></div>}</td></tr>)}
               </tbody></table></div>
               {memberItems.length === 0 && !memberLoading && !memberError && <div className="empty-state"><Users size={22} /><b>暂无成员</b><span>添加第一个内部协作账号</span></div>}
             </section>
           </>}
           {activeView === 'settings' && user.role === 'admin' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">SYSTEM POLICY OVERVIEW</p><h1>系统设置</h1><p>集中核对控制面正在执行的运行、安全、Agent 心跳和数据保留策略。</p></div>
+              <div><p className="eyebrow">运行与安全设置</p><h1>系统设置</h1><p>集中核对控制面正在执行的运行、安全、节点心跳和数据保留策略。</p></div>
               <button className="select-button" disabled={settingsLoading} onClick={() => loadSystemSettings()}>{settingsLoading ? '正在刷新…' : '刷新配置'}</button>
             </section>
             {settingsError && <div className="auth-error settings-error">{settingsError}</div>}
@@ -948,23 +1127,24 @@ function App() {
               </section>
               {!systemSettings.security.secureCookies && <div className="node-warning settings-warning"><ShieldCheck size={16} /><span><b>Secure Cookie 当前未启用</b>开发环境可以使用；公网部署应设置 PORTFLOW_SECURE_COOKIES=true 并通过 HTTPS 访问。</span></div>}
               <section className={systemSettings.deployment.ready ? 'panel readiness-panel ready' : 'panel readiness-panel'}>
-                <div className="readiness-summary"><span className="readiness-icon"><ShieldCheck size={22} /></span><div><p>DEPLOYMENT READINESS</p><h2>{systemSettings.deployment.ready ? '控制面已满足发布条件' : '发布前仍有检查项未通过'}</h2><span>{systemSettings.deployment.ready ? '持久存储、版本、安全 Cookie、HTTPS 和管理员检查均正常。' : '处理下面的失败项后再将控制面对公网正式发布。'}</span></div><b>{systemSettings.deployment.ready ? 'READY' : 'NOT READY'}</b></div>
+                <div className="readiness-summary"><span className="readiness-icon"><ShieldCheck size={22} /></span><div><p>部署状态检查</p><h2>{systemSettings.deployment.ready ? '控制面已满足发布条件' : '发布前仍有检查项未通过'}</h2><span>{systemSettings.deployment.ready ? '持久存储、版本、安全 Cookie、HTTPS 和管理员检查均正常。' : '处理下面的失败项后再将控制面对公网正式发布。'}</span></div><b>{systemSettings.deployment.ready ? '检查通过' : '需要处理'}</b></div>
                 <div className="readiness-checks">{systemSettings.deployment.checks.map((check) => <div key={check.id} className={check.status === 'pass' ? 'readiness-check passed' : 'readiness-check failed'}><i /><span><b>{check.label}</b><small>{check.detail}</small></span></div>)}</div>
               </section>
               <section className="settings-grid">
-                <article className="panel settings-panel"><div className="panel-heading"><div><h2>登录与会话安全</h2><p>由控制面认证中间件强制执行</p></div><span className="retention-badge">SECURITY</span></div><div className="settings-list">
+                <article className="panel settings-panel"><div className="panel-heading"><div><h2>登录与会话安全</h2><p>这些规则由控制面自动执行</p></div><span className="retention-badge">安全策略</span></div><div className="settings-list">
                   <div><span>会话有效期</span><b>{systemSettings.security.sessionTtlSeconds / 3600} 小时</b></div>
                   <div><span>密码长度</span><b>{systemSettings.security.passwordMinLength}–{systemSettings.security.passwordMaxLength} 字符</b></div>
                   <div><span>登录失败限制</span><b>{systemSettings.security.loginFailureWindowSeconds / 60} 分钟内 {systemSettings.security.loginFailureLimit} 次</b></div>
                   <div><span>Cookie 保护</span><b>{systemSettings.security.httpOnlyCookies ? 'HttpOnly' : '未启用'} · SameSite {systemSettings.security.sameSite}</b></div>
+                  <div><span>二次身份验证</span><b>{systemSettings.security.totpMfa ? '支持 TOTP 验证器与恢复码' : '未启用'}</b></div>
                 </div></article>
-                <article className="panel settings-panel"><div className="panel-heading"><div><h2>Agent 与快照上限</h2><p>所有批次均有明确资源边界</p></div><span className="retention-badge">BOUNDED</span></div><div className="settings-list">
+                <article className="panel settings-panel"><div className="panel-heading"><div><h2>节点与快照上限</h2><p>限制单次上报数量，避免占用过多资源</p></div><span className="retention-badge">资源限制</span></div><div className="settings-list">
                   <div><span>离线判定</span><b>{systemSettings.agents.offlineAfterSeconds} 秒</b></div>
                   <div><span>单次连接快照</span><b>{systemSettings.agents.maxConnectionsPerHeartbeat.toLocaleString()} 条</b></div>
                   <div><span>每节点保留快照</span><b>{systemSettings.agents.maxStoredConnectionsPerNode.toLocaleString()} 条</b></div>
                   <div><span>单次日志批次</span><b>{systemSettings.agents.maxLogsPerHeartbeat} 条</b></div>
                 </div></article>
-                <article className="panel settings-panel settings-retention-panel"><div className="panel-heading"><div><h2>数据保留策略</h2><p>数据库清理在 Agent 心跳事务中执行</p></div><span className="retention-badge">RETENTION</span></div><div className="retention-cards">
+                <article className="panel settings-panel settings-retention-panel"><div className="panel-heading"><div><h2>数据保留策略</h2><p>过期的节点指标和日志会由系统自动清理</p></div><span className="retention-badge">保留时间</span></div><div className="retention-cards">
                   <div><span>节点指标</span><b>{systemSettings.retention.nodeMetricsDays} 天</b><small>CPU、内存、磁盘、网络和流量历史</small></div>
                   <div><span>Agent 日志</span><b>{systemSettings.retention.agentLogsDays} 天</b><small>按接收时间自动清理</small></div>
                   <div><span>实时连接</span><b>最新快照</b><small>完整快照替换，截断快照有界保留</small></div>
@@ -976,29 +1156,30 @@ function App() {
           </>}
           {activeView === 'logs' && <>
             <section className="page-heading">
-              <div><p className="eyebrow">AGENT RUNTIME LOGS</p><h1>运行日志</h1><p>集中查看 Agent 与转发数据面的运行事件，不影响实际转发链路。</p></div>
+              <div><p className="eyebrow">节点运行与故障排查</p><h1>运行日志</h1><p>“错误”通常需要处理，“警告”建议留意，“信息”只是正常运行记录；查看日志不会影响转发。</p></div>
               <button className="select-button" disabled={logLoading} onClick={() => loadLogs()}>{logLoading ? '正在刷新…' : '刷新日志'}</button>
             </section>
             <section className="panel log-panel">
-              <div className="panel-heading"><div><h2>Agent 日志</h2><p>仅管理员可查看，按事件发生时间倒序排列</p></div><span className="retention-badge">保留 14 天</span></div>
+              <div className="panel-heading"><div><h2>节点程序日志</h2><p>最新消息排在最前面，选择节点和级别可以更快定位问题</p></div><span className="retention-badge">自动保留 14 天</span></div>
               <div className="log-filters">
                 <label><span>节点</span><select value={logNodeFilter} onChange={(event) => setLogNodeFilter(event.target.value)}><option value="">全部节点</option>{nodeItems.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></label>
                 <label><span>级别</span><select value={logLevelFilter} onChange={(event) => setLogLevelFilter(event.target.value)}><option value="">全部级别</option><option value="error">错误</option><option value="warning">警告</option><option value="info">信息</option></select></label>
                 <button className="select-button" disabled={logLoading} onClick={() => loadLogs()}>应用筛选</button>
               </div>
               {logError && <div className="auth-error audit-error">{logError}</div>}
-              <div className="table-wrap"><table className="log-table"><thead><tr><th>时间</th><th>级别</th><th>节点</th><th>组件</th><th>消息</th></tr></thead><tbody>
-                {logItems.map((entry) => <tr key={`${entry.nodeId}-${entry.id}`}><td>{new Date(entry.occurredAt).toLocaleString()}</td><td><span className={`log-level ${entry.level}`}>{entry.level === 'error' ? '错误' : entry.level === 'warning' ? '警告' : '信息'}</span></td><td><b>{nodeItems.find((node) => node.id === entry.nodeId)?.name ?? entry.nodeId}</b><br /><small>{entry.nodeId}</small></td><td><code>{entry.component}</code></td><td className="log-message">{entry.message}</td></tr>)}
+              <div className="log-guide"><span><i className="error" />错误：可能影响服务</span><span><i className="warning" />警告：建议检查</span><span><i className="info" />信息：正常记录</span></div>
+              <div className="table-wrap"><table className="log-table"><thead><tr><th>发生时间</th><th>重要程度</th><th>来自哪个节点</th><th>功能分类</th><th>具体内容</th></tr></thead><tbody>
+                {logItems.map((entry) => <tr key={`${entry.nodeId}-${entry.id}`}><td>{new Date(entry.occurredAt).toLocaleString()}</td><td><span className={`log-level ${entry.level}`}>{entry.level === 'error' ? '错误' : entry.level === 'warning' ? '警告' : '信息'}</span></td><td><b>{nodeItems.find((node) => node.id === entry.nodeId)?.name ?? entry.nodeId}</b><br /><small>{entry.nodeId}</small></td><td><b>{logComponentLabel(entry.component)}</b><small className="block-id">程序标识：{entry.component}</small></td><td className="log-message">{entry.message}</td></tr>)}
               </tbody></table></div>
               {logItems.length === 0 && !logLoading && !logError && <div className="empty-state"><TerminalSquare size={22} /><b>暂无运行日志</b><span>Agent 上报的新事件将显示在这里</span></div>}
               {logNextBefore && <button className="load-more" disabled={logLoading} onClick={() => loadLogs(logNextBefore, true)}>{logLoading ? '正在读取…' : '加载更早日志'}</button>}
             </section>
           </>}
-          <footer><span>PortFlow 控制面 · 1.0.4</span><span>数据面与控制面独立运行</span></footer>
+          <footer><span>PortFlow 控制面 · 1.1.0</span><span>数据面与控制面独立运行</span></footer>
         </div>
       </main>
       {showEnrollment && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="添加新节点"><button className="modal-backdrop" onClick={closeEnrollment} aria-label="关闭" /><section className="modal-card">
-        <div className="modal-heading"><div><p>SECURE ENROLLMENT</p><h2>添加新节点</h2><span>注册令牌仅显示一次，并在 30 分钟后失效。</span></div><button onClick={closeEnrollment}><X size={18} /></button></div>
+        <div className="modal-heading"><div><p>安全注册节点</p><h2>添加新节点</h2><span>注册令牌仅显示一次，并在 30 分钟后失效。</span></div><button onClick={closeEnrollment}><X size={18} /></button></div>
         {!enrollmentToken ? <form onSubmit={createEnrollmentToken}><label><span>节点名称</span><input value={enrollmentNodeName} onChange={(event) => setEnrollmentNodeName(event.target.value)} maxLength={80} required /></label><label><span>节点地区（可选）</span><input value={enrollmentRegion} onChange={(event) => setEnrollmentRegion(event.target.value)} maxLength={80} placeholder="例如：上海" /></label><label><span>令牌备注</span><input value={enrollmentName} onChange={(event) => setEnrollmentName(event.target.value)} maxLength={80} required /></label>{enrollmentError && <div className="auth-error">{enrollmentError}</div>}<button className="auth-submit" disabled={creatingToken}>{creatingToken ? '正在创建…' : '生成一次性注册令牌'}</button></form> : <div className="enrollment-result">
           <div className="success-mark"><ShieldCheck size={21} /></div><b>令牌已生成</b><span>请在目标 Linux 节点运行以下命令，完成后关闭此窗口。</span>
           <pre>{enrollmentInstallCommand()}</pre>
@@ -1006,21 +1187,56 @@ function App() {
           <button className="copy-button" onClick={() => navigator.clipboard.writeText(enrollmentInstallCommand())}>复制安装并注册命令</button>
         </div>}
       </section></div>}
+      {showSecurity && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="账户安全"><button className="modal-backdrop" onClick={closeSecurityCenter} aria-label="关闭" /><section className="modal-card security-modal">
+        <div className="modal-heading"><div><p>账户登录保护</p><h2>账户安全</h2><span>二次验证会在密码之外，再核对手机验证器中的动态验证码。</span></div><button onClick={closeSecurityCenter}><X size={18} /></button></div>
+        {recoveryCodes.length > 0 ? <div className="security-flow">
+          <div className="success-mark"><ShieldCheck size={22} /></div><h3>二次验证已开启</h3><p>请立即保存下面 8 个一次性恢复码。手机丢失时，每个恢复码只能登录一次，关闭窗口后不会再次显示。</p>
+          <div className="recovery-grid">{recoveryCodes.map((code) => <code key={code}>{code}</code>)}</div>
+          <button className="copy-button" onClick={() => navigator.clipboard.writeText(recoveryCodes.join('\n'))}><Copy size={16} />复制全部恢复码</button>
+          <div className="security-warning"><ShieldCheck size={17} /><span>请保存在密码管理器等安全位置，不要与账号密码放在同一处。</span></div>
+          <button className="auth-submit" onClick={closeSecurityCenter}>我已经安全保存</button>
+        </div> : user.mfaEnabled ? <form className="security-flow" onSubmit={disableMFA}>
+          <div className="security-status enabled"><ShieldCheck size={20} /><span><b>二次验证已开启</b><small>每次新登录都需要密码和 6 位动态验证码</small></span></div>
+          <h3>关闭二次验证</h3><p>关闭后账号只使用密码登录，安全性会降低。为防止他人代操作，需要再次输入密码和验证码。</p>
+          <label><span>当前密码</span><input type="password" autoComplete="current-password" value={securityPassword} onChange={(event) => setSecurityPassword(event.target.value)} required /></label>
+          <label><span>{securityUseRecovery ? '一次性恢复码' : '验证器中的 6 位验证码'}</span><input className="otp-input" inputMode={securityUseRecovery ? 'text' : 'numeric'} autoComplete="one-time-code" value={securityCode} onChange={(event) => setSecurityCode(event.target.value)} placeholder={securityUseRecovery ? 'XXXX-XXXX-XXXX' : '000000'} minLength={6} required /></label>
+          <button type="button" className="inline-switch" onClick={() => { setSecurityUseRecovery(!securityUseRecovery); setSecurityCode(''); setSecurityError('') }}>{securityUseRecovery ? '改用手机验证器' : '手机丢失？改用恢复码'}</button>
+          {securityError && <div className="auth-error">{securityError}</div>}
+          <div className="modal-actions"><button type="button" onClick={closeSecurityCenter}>取消</button><button className="danger-submit" disabled={securityBusy}>{securityBusy ? '正在验证…' : '确认关闭二次验证'}</button></div>
+        </form> : securitySecret ? <form className="security-flow" onSubmit={enableMFA}>
+          <div className="setup-steps"><span className="done">1</span><i /><span className="active">2</span><i /><span>3</span></div>
+          <h3>在手机验证器中添加 PortFlow</h3><ol><li>打开任意支持 TOTP 的验证器应用。</li><li>选择“输入设置密钥”或“手动添加”。</li><li>账号填写 <b>PortFlow:{user.username}</b>，密钥填写下面内容。</li></ol>
+          <div className="secret-box"><code>{securitySecret}</code><button type="button" onClick={() => navigator.clipboard.writeText(securitySecret)}><Copy size={15} />复制密钥</button></div>
+          <details><summary>验证器支持通过链接添加？</summary><div className="secret-box uri"><code>{securityURI}</code><button type="button" onClick={() => navigator.clipboard.writeText(securityURI)}><Copy size={15} />复制链接</button></div></details>
+          <label><span>输入验证器显示的 6 位数字</span><input className="otp-input" inputMode="numeric" autoComplete="one-time-code" value={securityCode} onChange={(event) => setSecurityCode(event.target.value)} placeholder="000000" minLength={6} required autoFocus /></label>
+          {securityError && <div className="auth-error">{securityError}</div>}
+          <div className="modal-actions"><button type="button" onClick={() => { setSecuritySecret(''); setSecurityURI(''); setSecurityCode('') }}>上一步</button><button className="auth-submit" disabled={securityBusy}>{securityBusy ? '正在验证…' : '验证并开启'}</button></div>
+        </form> : <form className="security-flow" onSubmit={startMFASetup}>
+          <div className="setup-steps"><span className="active">1</span><i /><span>2</span><i /><span>3</span></div>
+          <div className="security-status"><KeyRound size={20} /><span><b>当前仅使用密码登录</b><small>建议管理员和有线路修改权限的账号开启二次验证</small></span></div>
+          <h3>开始设置</h3><p>准备好手机验证器。为确认是你本人，请先输入当前账号密码。</p>
+          <label><span>当前密码</span><input type="password" autoComplete="current-password" value={securityPassword} onChange={(event) => setSecurityPassword(event.target.value)} required autoFocus /></label>
+          {securityError && <div className="auth-error">{securityError}</div>}
+          <div className="modal-actions"><button type="button" onClick={closeSecurityCenter}>取消</button><button className="auth-submit" disabled={securityBusy}>{securityBusy ? '正在确认…' : '下一步'}</button></div>
+        </form>}
+      </section></div>}
       {showMemberEditor && <div className="modal-layer" role="dialog" aria-modal="true" aria-label={editingMemberId ? '编辑成员权限' : '添加成员'}><button className="modal-backdrop" onClick={closeMemberEditor} aria-label="关闭" /><section className="modal-card member-modal">
-        <div className="modal-heading"><div><p>TEAM ACCESS</p><h2>{editingMemberId ? '编辑成员权限' : '添加成员'}</h2><span>{editingMemberId ? '保存后该账号的全部旧会话会立即失效。' : '为内部协作人员创建独立登录账号。'}</span></div><button onClick={closeMemberEditor}><X size={18} /></button></div>
+        <div className="modal-heading"><div><p>团队访问权限</p><h2>{editingMemberId ? '编辑成员权限' : '添加成员'}</h2><span>{editingMemberId ? '保存后该账号的全部旧会话会立即失效。' : '为内部协作人员创建独立登录账号。'}</span></div><button onClick={closeMemberEditor}><X size={18} /></button></div>
         <form onSubmit={saveMember}>
           <label><span>用户名</span><input value={memberUsername} onChange={(event) => setMemberUsername(event.target.value)} minLength={3} maxLength={32} disabled={Boolean(editingMemberId)} placeholder="teammate" required /></label>
           <label><span>{editingMemberId ? '重置密码（可留空）' : '初始密码'}</span><input type="password" autoComplete="new-password" value={memberPassword} onChange={(event) => setMemberPassword(event.target.value)} minLength={editingMemberId ? undefined : 12} maxLength={128} required={!editingMemberId} placeholder={editingMemberId ? '留空表示不修改' : '至少 12 个字符'} /></label>
           <label><span>账号角色</span><select value={memberRole} onChange={(event) => setMemberRole(event.target.value as 'admin' | 'member')}><option value="member">普通成员</option><option value="admin">管理员</option></select></label>
           {editingMemberId && <label className="toggle-label member-status-toggle"><span><b>禁用账号</b><small>禁用后不能登录，现有会话立即失效</small></span><button type="button" className={memberDisabled ? 'toggle active danger-toggle' : 'toggle'} onClick={() => setMemberDisabled(!memberDisabled)}><i /></button></label>}
+          {editingMemberId && memberItems.find((item) => item.id === editingMemberId)?.mfaEnabled && <label className="toggle-label member-status-toggle"><span><b>重置二次验证</b><small>仅在成员丢失手机和恢复码时使用，成员下次登录前需重新设置</small></span><button type="button" className={memberResetMFA ? 'toggle active danger-toggle' : 'toggle'} onClick={() => setMemberResetMFA(!memberResetMFA)}><i /></button></label>}
           <div className="capability-note"><ShieldCheck size={16} /><span>{memberRole === 'admin' ? '管理员可以管理成员、注册节点、配置双节点中转，并查看日志和审计。' : '普通成员可以查看运行状态并创建、修改或删除单节点直连线路。'}</span></div>
           {memberError && <div className="auth-error">{memberError}</div>}
           <div className="modal-actions"><button type="button" onClick={closeMemberEditor}>取消</button><button className="auth-submit" disabled={savingMember}>{savingMember ? '正在保存…' : editingMemberId ? '保存权限' : '创建成员'}</button></div>
         </form>
       </section></div>}
-      {showRuleEditor && <div className="modal-layer" role="dialog" aria-modal="true" aria-label={editingRuleId ? '编辑转发线路' : '创建转发线路'}><button className="modal-backdrop" onClick={closeRuleEditor} aria-label="关闭" /><section className="modal-card rule-modal">
-        <div className="modal-heading"><div><p>{ruleForm.mode === 'relay' ? 'ENCRYPTED RELAY DRAFT' : 'DIRECT FORWARD'}</p><h2>{editingRuleId ? '编辑转发线路' : '创建转发线路'}</h2><span>{ruleForm.mode === 'relay' ? '先保存入口与出口关系，隧道就绪前保持停用。' : '支持 TCP、UDP 和 TCP+UDP 单节点直连。'}</span></div><button onClick={closeRuleEditor}><X size={18} /></button></div>
+      {showRuleEditor && <div className="modal-layer" role="dialog" aria-modal="true" aria-label={editingRuleId ? '编辑转发线路' : copyingRule ? '复制转发线路' : '创建转发线路'}><button className="modal-backdrop" onClick={closeRuleEditor} aria-label="关闭" /><section className="modal-card rule-modal">
+        <div className="modal-heading"><div><p>{copyingRule ? '复制现有配置' : ruleForm.mode === 'relay' ? '双节点加密中转' : '单节点直接转发'}</p><h2>{editingRuleId ? '编辑转发线路' : copyingRule ? '复制转发线路' : '创建转发线路'}</h2><span>{copyingRule ? '目标地址和限制已复制，只需填写一个未占用的新监听端口。' : ruleForm.mode === 'relay' ? '先保存入口与出口关系，隧道就绪前保持停用。' : '支持 TCP、UDP 和 TCP+UDP 单节点直连。'}</span></div><button onClick={closeRuleEditor}><X size={18} /></button></div>
         <form className="rule-form" onSubmit={saveRule}>
+          {copyingRule && <div className="copy-notice wide"><Copy size={18} /><span><b>这会新建一条线路，不会修改原线路</b><small>同一节点的同一协议不能重复使用监听端口，因此端口没有被自动复制。</small></span></div>}
           <label className="wide"><span>线路名称</span><input value={ruleForm.name} onChange={(event) => setRuleForm({ ...ruleForm, name: event.target.value })} maxLength={80} placeholder="例如：生产 SSH" required /></label>
           <label><span>转发协议</span><select value={ruleForm.protocol} onChange={(event) => setRuleForm({ ...ruleForm, protocol: event.target.value as RuleForm['protocol'] })}><option value="tcp">TCP</option><option value="udp">UDP</option><option value="tcp_udp">TCP + UDP</option></select></label>
           <label><span>转发模式</span><select value={ruleForm.mode} onChange={(event) => { const mode = event.target.value as RuleForm['mode']; setRuleForm({ ...ruleForm, mode, enabled: mode === 'relay' ? false : ruleForm.enabled, egressNodeId: mode === 'relay' ? ruleForm.egressNodeId : '' }) }}><option value="direct">单节点直连</option><option value="relay" disabled={user.role !== 'admin'}>双节点加密中转（预配置）</option></select></label>
@@ -1040,7 +1256,7 @@ function App() {
           <label><span>拒绝来源 CIDR</span><textarea value={ruleForm.denyCidrs} onChange={(event) => setRuleForm({ ...ruleForm, denyCidrs: event.target.value })} placeholder={'每行一个网段\n198.51.100.8/32'} /></label>
           <div className="capability-note wide"><ShieldCheck size={16} /><span>{ruleForm.mode === 'relay' ? '入口与出口 Agent 会通过已配置的 WireGuard 私网地址连接；带宽上限只在入口执行一次。' : 'UDP 会话空闲 60 秒后自动清理；TCP 与 UDP 共享同一条线路带宽上限。'}</span></div>
           {ruleError && <div className="auth-error wide">{ruleError}</div>}
-          <div className="modal-actions wide"><button type="button" onClick={closeRuleEditor}>取消</button><button className="auth-submit" disabled={savingRule || nodeItems.length === 0}>{savingRule ? '正在保存…' : editingRuleId ? '保存并同步' : '创建并同步'}</button></div>
+          <div className="modal-actions wide"><button type="button" onClick={closeRuleEditor}>取消</button><button className="auth-submit" disabled={savingRule || nodeItems.length === 0}>{savingRule ? '正在保存…' : editingRuleId ? '保存并同步' : copyingRule ? '创建线路副本' : '创建并同步'}</button></div>
         </form>
       </section></div>}
     </div>

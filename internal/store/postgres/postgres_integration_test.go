@@ -57,6 +57,30 @@ func TestPostgresStoreLifecycle(t *testing.T) {
 	if err != nil || len(users) != 2 {
 		t.Fatalf("unexpected users: %#v err=%v", users, err)
 	}
+	mfaUser, err := database.SetUserMFA(ctx, user.ID, true, "encrypted-test-secret", []string{"recovery-one", "recovery-two"})
+	if err != nil || !mfaUser.MFAEnabled || len(mfaUser.MFARecoveryHashes) != 2 {
+		t.Fatalf("unexpected MFA user: %#v err=%v", mfaUser, err)
+	}
+	mfaSession := store.Session{ID: "integration-mfa-session", UserID: user.ID, TokenHash: "integration-mfa-token", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := database.CreateSession(ctx, mfaSession); err != nil {
+		t.Fatal(err)
+	}
+	_, sessionUser, err := database.SessionUserByTokenHash(ctx, mfaSession.TokenHash, now)
+	if err != nil || !sessionUser.MFAEnabled || sessionUser.MFASecret != "encrypted-test-secret" {
+		t.Fatalf("unexpected MFA session user: %#v err=%v", sessionUser, err)
+	}
+	consumed, err := database.ConsumeRecoveryCode(ctx, user.ID, "recovery-one")
+	if err != nil || !consumed {
+		t.Fatalf("consume recovery code: consumed=%v err=%v", consumed, err)
+	}
+	consumed, err = database.ConsumeRecoveryCode(ctx, user.ID, "recovery-one")
+	if err != nil || consumed {
+		t.Fatalf("reused recovery code: consumed=%v err=%v", consumed, err)
+	}
+	resetUser, err := database.UpdateUser(ctx, user.ID, store.UserUpdate{Role: store.RoleAdmin, ResetMFA: true})
+	if err != nil || resetUser.MFAEnabled || resetUser.MFASecret != "" || len(resetUser.MFARecoveryHashes) != 0 {
+		t.Fatalf("atomic MFA reset failed: %#v err=%v", resetUser, err)
+	}
 	enrollment := store.EnrollmentToken{ID: "integration-token", Name: "integration", TokenHash: "integration-token-hash", CreatedBy: user.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := database.CreateEnrollmentToken(ctx, enrollment); err != nil {
 		t.Fatal(err)

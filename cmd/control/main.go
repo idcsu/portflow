@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -44,10 +45,21 @@ func main() {
 	defer storage.Close()
 
 	secureCookies := !strings.EqualFold(os.Getenv("PORTFLOW_SECURE_COOKIES"), "false")
+	mfaKeyHex := strings.TrimSpace(os.Getenv("PORTFLOW_MFA_ENCRYPTION_KEY"))
+	var mfaKey []byte
+	if storageMode == "postgres" {
+		if mfaKeyHex == "" {
+			log.Fatal("PORTFLOW_MFA_ENCRYPTION_KEY is required with persistent storage")
+		}
+		mfaKey, err = hex.DecodeString(mfaKeyHex)
+		if err != nil || len(mfaKey) != 32 {
+			log.Fatal("PORTFLOW_MFA_ENCRYPTION_KEY must be exactly 64 hexadecimal characters")
+		}
+	}
 	server := &http.Server{
 		Addr: *listen,
 		Handler: control.NewServer(control.Options{
-			Build: control.BuildInfo{Version: version}, Store: storage, StorageMode: storageMode, SecureCookies: secureCookies,
+			Build: control.BuildInfo{Version: version}, Store: storage, StorageMode: storageMode, SecureCookies: secureCookies, MFAEncryptionKey: mfaKey,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

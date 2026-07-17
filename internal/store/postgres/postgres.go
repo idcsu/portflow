@@ -148,7 +148,7 @@ func (postgres *Store) UpdateUser(ctx context.Context, userID string, update sto
 	if _, err := transaction.ExecContext(ctx, "SELECT pg_advisory_xact_lock(706733042)"); err != nil {
 		return store.User{}, err
 	}
-	previous, err := scanUser(transaction.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,created_at FROM users WHERE id=$1 FOR UPDATE`, userID))
+	previous, err := scanUser(transaction.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users WHERE id=$1 FOR UPDATE`, userID))
 	if err != nil {
 		return store.User{}, err
 	}
@@ -165,9 +165,22 @@ func (postgres *Store) UpdateUser(ctx context.Context, userID string, update sto
 	if update.PasswordHash != "" {
 		passwordHash = update.PasswordHash
 	}
+	mfaEnabled := previous.MFAEnabled
+	mfaSecret := previous.MFASecret
+	mfaRecoveryHashes := previous.MFARecoveryHashes
+	if update.ResetMFA {
+		mfaEnabled = false
+		mfaSecret = ""
+		mfaRecoveryHashes = nil
+	}
+	encodedRecoveryHashes, err := json.Marshal(mfaRecoveryHashes)
+	if err != nil {
+		return store.User{}, err
+	}
 	updated, err := scanUser(transaction.QueryRowContext(ctx, `
-		UPDATE users SET role=$2,disabled=$3,password_hash=$4 WHERE id=$1
-		RETURNING id,username,password_hash,role,disabled,created_at`, userID, update.Role, update.Disabled, passwordHash))
+		UPDATE users SET role=$2,disabled=$3,password_hash=$4,mfa_enabled=$5,mfa_secret=$6,mfa_recovery_hashes=$7::jsonb WHERE id=$1
+		RETURNING id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at`,
+		userID, update.Role, update.Disabled, passwordHash, mfaEnabled, mfaSecret, string(encodedRecoveryHashes)))
 	if err != nil {
 		return store.User{}, err
 	}
@@ -180,8 +193,92 @@ func (postgres *Store) UpdateUser(ctx context.Context, userID string, update sto
 	return updated, nil
 }
 
+func (postgres *Store) DeleteUser(ctx context.Context, userID string) error {
+	transaction, err := postgres.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, "SELECT pg_advisory_xact_lock(706733042)"); err != nil {
+		return err
+	}
+	user, err := scanUser(transaction.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users WHERE id=$1 FOR UPDATE`, userID))
+	if err != nil {
+		return err
+	}
+	if user.Role == store.RoleAdmin && !user.Disabled {
+		var activeAdministrators int
+		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=FALSE`).Scan(&activeAdministrators); err != nil {
+			return err
+		}
+		if activeAdministrators <= 1 {
+			return store.ErrLastAdministrator
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM enrollment_tokens WHERE created_by=$1`, userID); err != nil {
+		return err
+	}
+	result, err := transaction.ExecContext(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return err
+		}
+		return store.ErrNotFound
+	}
+	return transaction.Commit()
+}
+
+func (postgres *Store) SetUserMFA(ctx context.Context, userID string, enabled bool, secret string, recoveryHashes []string) (store.User, error) {
+	encoded, err := json.Marshal(recoveryHashes)
+	if err != nil {
+		return store.User{}, err
+	}
+	return scanUser(postgres.database.QueryRowContext(ctx, `
+		UPDATE users SET mfa_enabled=$2,mfa_secret=$3,mfa_recovery_hashes=$4::jsonb WHERE id=$1
+		RETURNING id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at`,
+		userID, enabled, secret, string(encoded)))
+}
+
+func (postgres *Store) ConsumeRecoveryCode(ctx context.Context, userID, hash string) (bool, error) {
+	transaction, err := postgres.database.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer transaction.Rollback()
+	user, err := scanUser(transaction.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users WHERE id=$1 FOR UPDATE`, userID))
+	if err != nil {
+		return false, err
+	}
+	found := false
+	remaining := make([]string, 0, len(user.MFARecoveryHashes))
+	for _, candidate := range user.MFARecoveryHashes {
+		if !found && candidate == hash {
+			found = true
+			continue
+		}
+		remaining = append(remaining, candidate)
+	}
+	if !found {
+		return false, nil
+	}
+	encoded, err := json.Marshal(remaining)
+	if err != nil {
+		return false, err
+	}
+	if _, err := transaction.ExecContext(ctx, `UPDATE users SET mfa_recovery_hashes=$2::jsonb WHERE id=$1`, userID, string(encoded)); err != nil {
+		return false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (postgres *Store) ListUsers(ctx context.Context) ([]store.User, error) {
-	rows, err := postgres.database.QueryContext(ctx, `SELECT id,username,password_hash,role,disabled,created_at FROM users ORDER BY created_at,username`)
+	rows, err := postgres.database.QueryContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users ORDER BY created_at,username`)
 	if err != nil {
 		return nil, err
 	}
@@ -199,19 +296,28 @@ func (postgres *Store) ListUsers(ctx context.Context) ([]store.User, error) {
 
 func scanUser(row interface{ Scan(...interface{}) error }) (store.User, error) {
 	var user store.User
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Disabled, &user.CreatedAt)
+	var recoveryJSON []byte
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Disabled, &user.MFAEnabled, &user.MFASecret, &recoveryJSON, &user.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.User{}, store.ErrNotFound
 	}
-	return user, err
+	if err != nil {
+		return store.User{}, err
+	}
+	if len(recoveryJSON) > 0 {
+		if err := json.Unmarshal(recoveryJSON, &user.MFARecoveryHashes); err != nil {
+			return store.User{}, err
+		}
+	}
+	return user, nil
 }
 
 func (postgres *Store) UserByUsername(ctx context.Context, username string) (store.User, error) {
-	return scanUser(postgres.database.QueryRowContext(ctx, `SELECT id, username, password_hash, role, disabled, created_at FROM users WHERE username=$1`, username))
+	return scanUser(postgres.database.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users WHERE username=$1`, username))
 }
 
 func (postgres *Store) UserByID(ctx context.Context, id string) (store.User, error) {
-	return scanUser(postgres.database.QueryRowContext(ctx, `SELECT id, username, password_hash, role, disabled, created_at FROM users WHERE id=$1`, id))
+	return scanUser(postgres.database.QueryRowContext(ctx, `SELECT id,username,password_hash,role,disabled,mfa_enabled,mfa_secret,mfa_recovery_hashes,created_at FROM users WHERE id=$1`, id))
 }
 
 func (postgres *Store) CreateSession(ctx context.Context, session store.Session) error {
@@ -223,15 +329,19 @@ func (postgres *Store) CreateSession(ctx context.Context, session store.Session)
 func (postgres *Store) SessionUserByTokenHash(ctx context.Context, tokenHash string, now time.Time) (store.Session, store.User, error) {
 	var session store.Session
 	var user store.User
+	var recoveryJSON []byte
 	err := postgres.database.QueryRowContext(ctx, `
 		SELECT s.id,s.user_id,s.token_hash,s.expires_at,s.created_at,
-		       u.id,u.username,u.password_hash,u.role,u.disabled,u.created_at
+		       u.id,u.username,u.password_hash,u.role,u.disabled,u.mfa_enabled,u.mfa_secret,u.mfa_recovery_hashes,u.created_at
 		FROM sessions s JOIN users u ON u.id=s.user_id
 		WHERE s.token_hash=$1 AND s.expires_at>$2 AND u.disabled=FALSE`, tokenHash, now).Scan(
 		&session.ID, &session.UserID, &session.TokenHash, &session.ExpiresAt, &session.CreatedAt,
-		&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Disabled, &user.CreatedAt)
+		&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Disabled, &user.MFAEnabled, &user.MFASecret, &recoveryJSON, &user.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.Session{}, store.User{}, store.ErrNotFound
+	}
+	if err == nil && len(recoveryJSON) > 0 {
+		err = json.Unmarshal(recoveryJSON, &user.MFARecoveryHashes)
 	}
 	return session, user, err
 }

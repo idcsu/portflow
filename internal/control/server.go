@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,12 +37,13 @@ type BuildInfo struct {
 }
 
 type Options struct {
-	Build         BuildInfo
-	Store         store.Store
-	StorageMode   string
-	SecureCookies bool
-	SessionTTL    time.Duration
-	Now           func() time.Time
+	Build            BuildInfo
+	Store            store.Store
+	StorageMode      string
+	SecureCookies    bool
+	SessionTTL       time.Duration
+	Now              func() time.Time
+	MFAEncryptionKey []byte
 }
 
 type server struct {
@@ -52,6 +54,7 @@ type server struct {
 	secureCookies bool
 	sessionTTL    time.Duration
 	now           func() time.Time
+	mfaProtector  *auth.SecretProtector
 	loginMu       sync.Mutex
 	loginAttempts map[string]loginAttempt
 }
@@ -74,17 +77,32 @@ func NewServer(options Options) http.Handler {
 	if options.StorageMode == "" {
 		options.StorageMode = "memory"
 	}
+	if len(options.MFAEncryptionKey) == 0 {
+		var err error
+		options.MFAEncryptionKey, err = auth.NewEncryptionKey()
+		if err != nil {
+			panic("control server could not create a development MFA key")
+		}
+	}
+	protector, err := auth.NewSecretProtector(options.MFAEncryptionKey)
+	if err != nil {
+		panic("control server requires a valid MFA encryption key: " + err.Error())
+	}
 	application := &server{
 		startedAt: options.Now().UTC(), build: options.Build, store: options.Store,
 		storageMode: options.StorageMode, secureCookies: options.SecureCookies, sessionTTL: options.SessionTTL, now: options.Now,
-		loginAttempts: make(map[string]loginAttempt),
+		loginAttempts: make(map[string]loginAttempt), mfaProtector: protector,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", application.health)
 	mux.HandleFunc("/api/v1/setup/admin", application.setupAdmin)
+	mux.HandleFunc("/api/v1/setup/status", application.setupStatus)
 	mux.HandleFunc("/api/v1/auth/login", application.login)
 	mux.HandleFunc("/api/v1/auth/logout", application.logout)
 	mux.HandleFunc("/api/v1/auth/me", application.me)
+	mux.HandleFunc("/api/v1/auth/mfa/setup", application.mfaSetup)
+	mux.HandleFunc("/api/v1/auth/mfa/enable", application.mfaEnable)
+	mux.HandleFunc("/api/v1/auth/mfa/disable", application.mfaDisable)
 	mux.HandleFunc("/api/v1/users", application.users)
 	mux.HandleFunc("/api/v1/users/", application.user)
 	mux.HandleFunc("/api/v1/enrollment-tokens", application.enrollmentTokens)
@@ -102,6 +120,20 @@ func NewServer(options Options) http.Handler {
 	mux.HandleFunc("/api/v1/connections", application.activeConnections)
 	mux.HandleFunc("/api/v1/system/settings", application.systemSettings)
 	return securityHeaders(requestLog(mux))
+}
+
+func (server *server) setupStatus(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response, http.MethodGet)
+		return
+	}
+	users, err := server.store.ListUsers(request.Context())
+	if err != nil {
+		log.Printf("load setup status: %v", err)
+		writeError(response, http.StatusInternalServerError, "storage_error", "unable to check setup status")
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]interface{}{"required": len(users) == 0})
 }
 
 func (server *server) health(response http.ResponseWriter, request *http.Request) {
@@ -168,9 +200,12 @@ func (server *server) login(response http.ResponseWriter, request *http.Request)
 		methodNotAllowed(response, http.MethodPost)
 		return
 	}
+	response.Header().Set("Cache-Control", "no-store")
 	var input struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		Code         string `json:"code"`
+		RecoveryCode string `json:"recoveryCode"`
 	}
 	if !decodeJSON(response, request, &input) {
 		return
@@ -193,6 +228,29 @@ func (server *server) login(response http.ResponseWriter, request *http.Request)
 		server.invalidCredentials(response)
 		return
 	}
+	if user.MFAEnabled {
+		valid := false
+		if strings.TrimSpace(input.Code) != "" {
+			secret, decryptErr := server.mfaProtector.Decrypt(user.MFASecret)
+			valid = decryptErr == nil && auth.ValidateTOTP(secret, input.Code, server.now().UTC())
+		} else if strings.TrimSpace(input.RecoveryCode) != "" {
+			valid, err = server.store.ConsumeRecoveryCode(request.Context(), user.ID, auth.RecoveryCodeHash(input.RecoveryCode))
+			if err != nil {
+				log.Printf("consume MFA recovery code: %v", err)
+				writeError(response, http.StatusInternalServerError, "storage_error", "unable to verify recovery code")
+				return
+			}
+		} else {
+			writeJSON(response, http.StatusAccepted, map[string]interface{}{"mfaRequired": true})
+			return
+		}
+		if !valid {
+			server.recordLoginFailure(attemptKey)
+			server.audit(request, "anonymous", "", "auth.mfa_failed", "user", user.ID, map[string]interface{}{"username": username})
+			writeError(response, http.StatusUnauthorized, "invalid_mfa_code", "verification code is incorrect or expired")
+			return
+		}
+	}
 	rawToken, err := auth.NewToken(32)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, "internal_error", "unable to create session")
@@ -214,6 +272,146 @@ func (server *server) login(response http.ResponseWriter, request *http.Request)
 	server.setSessionCookie(response, rawToken, session.ExpiresAt)
 	server.audit(request, "user", user.ID, "auth.login", "session", session.ID, nil)
 	writeJSON(response, http.StatusOK, map[string]interface{}{"user": publicUser(user), "expiresAt": session.ExpiresAt})
+}
+
+func (server *server) mfaSetup(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(response, http.MethodPost)
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	_, user, ok := server.requireUser(response, request, "")
+	if !ok {
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(response, request, &input) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, input.Password) {
+		writeError(response, http.StatusUnauthorized, "invalid_password", "current password is incorrect")
+		return
+	}
+	if user.MFAEnabled {
+		writeError(response, http.StatusConflict, "mfa_already_enabled", "disable existing MFA before setting it up again")
+		return
+	}
+	secret, err := auth.NewTOTPSecret()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, "internal_error", "unable to create MFA secret")
+		return
+	}
+	encrypted, err := server.mfaProtector.Encrypt(secret)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, "internal_error", "unable to protect MFA secret")
+		return
+	}
+	if _, err := server.store.SetUserMFA(request.Context(), user.ID, false, encrypted, nil); err != nil {
+		writeError(response, http.StatusInternalServerError, "storage_error", "unable to save MFA setup")
+		return
+	}
+	label := url.QueryEscape("PortFlow:" + user.Username)
+	issuer := url.QueryEscape("PortFlow")
+	server.audit(request, "user", user.ID, "auth.mfa_setup", "user", user.ID, nil)
+	writeJSON(response, http.StatusOK, map[string]interface{}{
+		"secret":     secret,
+		"otpauthUrl": "otpauth://totp/" + label + "?secret=" + url.QueryEscape(secret) + "&issuer=" + issuer + "&algorithm=SHA1&digits=6&period=30",
+	})
+}
+
+func (server *server) mfaEnable(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(response, http.MethodPost)
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	_, user, ok := server.requireUser(response, request, "")
+	if !ok {
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if !decodeJSON(response, request, &input) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, input.Password) {
+		writeError(response, http.StatusUnauthorized, "invalid_password", "current password is incorrect")
+		return
+	}
+	if user.MFASecret == "" {
+		writeError(response, http.StatusConflict, "mfa_setup_required", "start MFA setup before enabling it")
+		return
+	}
+	secret, err := server.mfaProtector.Decrypt(user.MFASecret)
+	if err != nil || !auth.ValidateTOTP(secret, input.Code, server.now().UTC()) {
+		writeError(response, http.StatusUnauthorized, "invalid_mfa_code", "verification code is incorrect or expired")
+		return
+	}
+	codes, err := auth.NewRecoveryCodes(8)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, "internal_error", "unable to create recovery codes")
+		return
+	}
+	hashes := make([]string, 0, len(codes))
+	for _, code := range codes {
+		hashes = append(hashes, auth.RecoveryCodeHash(code))
+	}
+	if _, err := server.store.SetUserMFA(request.Context(), user.ID, true, user.MFASecret, hashes); err != nil {
+		writeError(response, http.StatusInternalServerError, "storage_error", "unable to enable MFA")
+		return
+	}
+	server.audit(request, "user", user.ID, "auth.mfa_enable", "user", user.ID, nil)
+	writeJSON(response, http.StatusOK, map[string]interface{}{"enabled": true, "recoveryCodes": codes})
+}
+
+func (server *server) mfaDisable(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(response, http.MethodPost)
+		return
+	}
+	_, user, ok := server.requireUser(response, request, "")
+	if !ok {
+		return
+	}
+	var input struct {
+		Password     string `json:"password"`
+		Code         string `json:"code"`
+		RecoveryCode string `json:"recoveryCode"`
+	}
+	if !decodeJSON(response, request, &input) {
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, input.Password) {
+		writeError(response, http.StatusUnauthorized, "invalid_password", "current password is incorrect")
+		return
+	}
+	valid := !user.MFAEnabled
+	if user.MFAEnabled && strings.TrimSpace(input.Code) != "" {
+		secret, err := server.mfaProtector.Decrypt(user.MFASecret)
+		valid = err == nil && auth.ValidateTOTP(secret, input.Code, server.now().UTC())
+	} else if user.MFAEnabled && strings.TrimSpace(input.RecoveryCode) != "" {
+		var err error
+		valid, err = server.store.ConsumeRecoveryCode(request.Context(), user.ID, auth.RecoveryCodeHash(input.RecoveryCode))
+		if err != nil {
+			log.Printf("consume MFA recovery code while disabling: %v", err)
+			writeError(response, http.StatusInternalServerError, "storage_error", "unable to verify recovery code")
+			return
+		}
+	}
+	if !valid {
+		writeError(response, http.StatusUnauthorized, "invalid_mfa_code", "verification code is incorrect or expired")
+		return
+	}
+	if _, err := server.store.SetUserMFA(request.Context(), user.ID, false, "", nil); err != nil {
+		writeError(response, http.StatusInternalServerError, "storage_error", "unable to disable MFA")
+		return
+	}
+	server.audit(request, "user", user.ID, "auth.mfa_disable", "user", user.ID, nil)
+	writeJSON(response, http.StatusOK, map[string]interface{}{"enabled": false})
 }
 
 func (server *server) loginRateLimited(key string) bool {
@@ -349,8 +547,9 @@ func (server *server) users(response http.ResponseWriter, request *http.Request)
 }
 
 func (server *server) user(response http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPut {
-		methodNotAllowed(response, http.MethodPut)
+	if request.Method != http.MethodPut && request.Method != http.MethodDelete {
+		response.Header().Set("Allow", http.MethodPut+", "+http.MethodDelete)
+		writeError(response, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	_, actor, ok := server.requireUser(response, request, store.RoleAdmin)
@@ -363,13 +562,40 @@ func (server *server) user(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if userID == actor.ID {
-		writeError(response, http.StatusConflict, "self_modification", "use another administrator account to change your own role or status")
+		writeError(response, http.StatusConflict, "self_modification", "the current account cannot modify or delete itself here")
+		return
+	}
+	if request.Method == http.MethodDelete {
+		previous, err := server.store.UserByID(request.Context(), userID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(response, http.StatusNotFound, "not_found", "user not found")
+				return
+			}
+			writeError(response, http.StatusInternalServerError, "storage_error", "unable to load user")
+			return
+		}
+		if err := server.store.DeleteUser(request.Context(), userID); err != nil {
+			if errors.Is(err, store.ErrLastAdministrator) {
+				writeError(response, http.StatusConflict, "last_administrator", "at least one active administrator is required")
+				return
+			}
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(response, http.StatusNotFound, "not_found", "user not found")
+				return
+			}
+			writeError(response, http.StatusInternalServerError, "storage_error", "unable to delete user")
+			return
+		}
+		server.audit(request, "user", actor.ID, "user.delete", "user", userID, map[string]interface{}{"username": previous.Username, "role": previous.Role})
+		response.WriteHeader(http.StatusNoContent)
 		return
 	}
 	var input struct {
 		Role     store.Role `json:"role"`
 		Disabled bool       `json:"disabled"`
 		Password string     `json:"password"`
+		ResetMFA bool       `json:"resetMfa"`
 	}
 	if !decodeJSON(response, request, &input) {
 		return
@@ -396,7 +622,7 @@ func (server *server) user(response http.ResponseWriter, request *http.Request) 
 		writeError(response, http.StatusInternalServerError, "storage_error", "unable to load user")
 		return
 	}
-	updated, err := server.store.UpdateUser(request.Context(), userID, store.UserUpdate{Role: input.Role, Disabled: input.Disabled, PasswordHash: passwordHash})
+	updated, err := server.store.UpdateUser(request.Context(), userID, store.UserUpdate{Role: input.Role, Disabled: input.Disabled, PasswordHash: passwordHash, ResetMFA: input.ResetMFA})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(response, http.StatusNotFound, "not_found", "user not found")
@@ -412,7 +638,7 @@ func (server *server) user(response http.ResponseWriter, request *http.Request) 
 	}
 	server.audit(request, "user", actor.ID, "user.update", "user", updated.ID, map[string]interface{}{
 		"username": updated.Username, "previousRole": previous.Role, "role": updated.Role,
-		"previousDisabled": previous.Disabled, "disabled": updated.Disabled, "passwordReset": passwordHash != "",
+		"previousDisabled": previous.Disabled, "disabled": updated.Disabled, "passwordReset": passwordHash != "", "mfaReset": input.ResetMFA,
 	})
 	writeJSON(response, http.StatusOK, publicUser(updated))
 }
@@ -1331,6 +1557,7 @@ func (server *server) systemSettings(response http.ResponseWriter, request *http
 		},
 		"security": map[string]interface{}{
 			"secureCookies": server.secureCookies, "httpOnlyCookies": true, "sameSite": "strict",
+			"totpMfa":           true,
 			"sessionTtlSeconds": int64(server.sessionTTL / time.Second),
 			"passwordMinLength": auth.MinPasswordLength, "passwordMaxLength": auth.MaxPasswordLength,
 			"loginFailureLimit": loginFailureLimit, "loginFailureWindowSeconds": int64(loginFailureWindow / time.Second),
@@ -1398,7 +1625,7 @@ func sessionToken(request *http.Request) string {
 }
 
 func publicUser(user store.User) map[string]interface{} {
-	return map[string]interface{}{"id": user.ID, "username": user.Username, "role": user.Role, "disabled": user.Disabled, "createdAt": user.CreatedAt}
+	return map[string]interface{}{"id": user.ID, "username": user.Username, "role": user.Role, "disabled": user.Disabled, "mfaEnabled": user.MFAEnabled, "createdAt": user.CreatedAt}
 }
 
 func decodeJSON(response http.ResponseWriter, request *http.Request, destination interface{}) bool {
