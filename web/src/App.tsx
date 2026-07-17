@@ -60,6 +60,12 @@ const fallbackSummary: Summary = {
 }
 
 const emptyTraffic: TrafficHistory = { from: '', to: '', intervalSeconds: 1800, uploadBytes: 0, downloadBytes: 0, points: [] }
+const installerVersion = '1.0.3'
+const installerRepository = 'idcsu/portflow'
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\\"'\\\"")}'`
+}
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -233,6 +239,8 @@ function App() {
   const [nodeDetailError, setNodeDetailError] = useState('')
   const [showEnrollment, setShowEnrollment] = useState(false)
   const [enrollmentName, setEnrollmentName] = useState('新节点注册')
+  const [enrollmentNodeName, setEnrollmentNodeName] = useState('New Node')
+  const [enrollmentRegion, setEnrollmentRegion] = useState('')
   const [enrollmentToken, setEnrollmentToken] = useState('')
   const [enrollmentError, setEnrollmentError] = useState('')
   const [creatingToken, setCreatingToken] = useState(false)
@@ -454,6 +462,10 @@ function App() {
     setShowEnrollment(false)
     setEnrollmentToken('')
     setEnrollmentError('')
+  }
+
+  function enrollmentInstallCommand() {
+    return `curl -fsSL https://raw.githubusercontent.com/${installerRepository}/v${installerVersion}/install.sh | sudo bash -s -- agent --repo ${installerRepository} --version ${installerVersion} --control-url ${shellQuote(window.location.origin)} --enrollment-token ${shellQuote(enrollmentToken)} --name ${shellQuote(enrollmentNodeName)} --region ${shellQuote(enrollmentRegion)}`
   }
 
   function openCreateRule() {
@@ -909,10 +921,11 @@ function App() {
       </main>
       {showEnrollment && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="添加新节点"><button className="modal-backdrop" onClick={closeEnrollment} aria-label="关闭" /><section className="modal-card">
         <div className="modal-heading"><div><p>SECURE ENROLLMENT</p><h2>添加新节点</h2><span>注册令牌仅显示一次，并在 30 分钟后失效。</span></div><button onClick={closeEnrollment}><X size={18} /></button></div>
-        {!enrollmentToken ? <form onSubmit={createEnrollmentToken}><label><span>令牌备注</span><input value={enrollmentName} onChange={(event) => setEnrollmentName(event.target.value)} maxLength={80} required /></label>{enrollmentError && <div className="auth-error">{enrollmentError}</div>}<button className="auth-submit" disabled={creatingToken}>{creatingToken ? '正在创建…' : '生成一次性注册令牌'}</button></form> : <div className="enrollment-result">
+        {!enrollmentToken ? <form onSubmit={createEnrollmentToken}><label><span>节点名称</span><input value={enrollmentNodeName} onChange={(event) => setEnrollmentNodeName(event.target.value)} maxLength={80} required /></label><label><span>节点地区（可选）</span><input value={enrollmentRegion} onChange={(event) => setEnrollmentRegion(event.target.value)} maxLength={80} placeholder="例如：上海" /></label><label><span>令牌备注</span><input value={enrollmentName} onChange={(event) => setEnrollmentName(event.target.value)} maxLength={80} required /></label>{enrollmentError && <div className="auth-error">{enrollmentError}</div>}<button className="auth-submit" disabled={creatingToken}>{creatingToken ? '正在创建…' : '生成一次性注册令牌'}</button></form> : <div className="enrollment-result">
           <div className="success-mark"><ShieldCheck size={21} /></div><b>令牌已生成</b><span>请在目标 Linux 节点运行以下命令，完成后关闭此窗口。</span>
-          <pre>{`./portflow-agent \\\n  -control-url ${window.location.origin} \\\n  -enrollment-token '${enrollmentToken}' \\\n  -name 'New Node' \\\n  -region 'Region'`}</pre>
-          <button className="copy-button" onClick={() => navigator.clipboard.writeText(`./portflow-agent -control-url ${window.location.origin} -enrollment-token '${enrollmentToken}' -name 'New Node' -region 'Region'`)}>复制注册命令</button>
+          <pre>{enrollmentInstallCommand()}</pre>
+          <div className="capability-note"><ShieldCheck size={16} /><span>命令会按节点架构从 GitHub 正式版本下载、校验并安装 Agent，再使用一次性令牌注册和启动服务；不会修改防火墙或云安全组。</span></div>
+          <button className="copy-button" onClick={() => navigator.clipboard.writeText(enrollmentInstallCommand())}>复制安装并注册命令</button>
         </div>}
       </section></div>}
       {showMemberEditor && <div className="modal-layer" role="dialog" aria-modal="true" aria-label={editingMemberId ? '编辑成员权限' : '添加成员'}><button className="modal-backdrop" onClick={closeMemberEditor} aria-label="关闭" /><section className="modal-card member-modal">

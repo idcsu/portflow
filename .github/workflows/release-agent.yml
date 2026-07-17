@@ -1,0 +1,53 @@
+name: 发布 Agent 安装包
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@v4
+
+      - name: 配置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 构建 Linux Agent
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          for architecture in amd64 arm64; do
+            package="portflow-agent-linux-${architecture}"
+            mkdir -p "dist/${package}/deploy/agent" "dist/${package}/deploy/systemd"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" go build -buildvcs=false -trimpath \
+              -ldflags "-s -w -X main.agentVersion=${GITHUB_REF_NAME#v}" \
+              -o "dist/${package}/portflow-agent" ./cmd/agent
+            cp deploy/agent/install.sh "dist/${package}/deploy/agent/install.sh"
+            cp deploy/systemd/portflow-agent.service "dist/${package}/deploy/systemd/portflow-agent.service"
+            chmod 0755 "dist/${package}/portflow-agent" "dist/${package}/deploy/agent/install.sh"
+            tar -C dist -czf "dist/${package}.tar.gz" "$package"
+          done
+          (
+            cd dist
+            sha256sum portflow-agent-linux-*.tar.gz > sha256sums.txt
+          )
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PortFlow ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/portflow-agent-linux-amd64.tar.gz \
+            dist/portflow-agent-linux-arm64.tar.gz \
+            dist/sha256sums.txt

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # PortFlow 中文交互式控制面管理器。
 # 系统级安装和防火墙变更必须先说明原因、影响与恢复方式，再获得明确确认。
 
-PROGRAM_VERSION="1.0.2"
+PROGRAM_VERSION="1.0.3"
 INSTALL_ROOT="${PORTFLOW_INSTALL_ROOT:-/opt/portflow}"
 RELEASES_DIR="$INSTALL_ROOT/releases"
 SHARED_DIR="$INSTALL_ROOT/shared"
@@ -19,6 +19,10 @@ ACTION="menu"
 REPOSITORY_ARG=""
 RELEASE_TAG_ARG=""
 SOURCE_DIR_ARG=""
+AGENT_CONTROL_URL=""
+AGENT_ENROLLMENT_TOKEN=""
+AGENT_NODE_NAME=""
+AGENT_REGION=""
 
 if (: </dev/tty) 2>/dev/null && (: >/dev/tty) 2>/dev/null; then
   exec 3</dev/tty 4>/dev/tty
@@ -56,15 +60,20 @@ PortFlow 中文部署管理器
   install.sh backup                 备份 PostgreSQL
   install.sh restart                重启控制面
   install.sh rollback               回滚到以前安装的版本
+  install.sh agent [选项]           下载、安装并注册一个 Agent 节点
   install.sh firewall               管理 Agent 转发端口防火墙规则
   install.sh uninstall              卸载
   install.sh check                  只读环境检查
 
 选项：
   --repo OWNER/REPO                 GitHub 仓库，例如 acme/portflow
-  --version VERSION                 发布版本，例如 1.0.2（对应标签 v1.0.2）
+  --version VERSION                 发布版本，例如 1.0.3（对应标签 v1.0.3）
   --tag TAG                         直接指定 Git 标签
   --source DIRECTORY                从本地源码目录安装，用于开发或离线部署
+  --control-url URL                 Agent 注册使用的控制面 HTTPS 地址
+  --enrollment-token TOKEN          面板生成的一次性节点注册令牌
+  --name NAME                       Agent 节点名称
+  --region REGION                   Agent 节点地区（可选）
   --root DIRECTORY                  安装根目录，默认 /opt/portflow
   --help                            显示帮助
 
@@ -88,6 +97,10 @@ parse_args() {
       --version) [ $# -ge 2 ] || die "--version 缺少参数"; RELEASE_TAG_ARG="v$2"; shift 2 ;;
       --tag) [ $# -ge 2 ] || die "--tag 缺少参数"; RELEASE_TAG_ARG="$2"; shift 2 ;;
       --source) [ $# -ge 2 ] || die "--source 缺少参数"; SOURCE_DIR_ARG="$2"; shift 2 ;;
+      --control-url) [ $# -ge 2 ] || die "--control-url 缺少参数"; AGENT_CONTROL_URL="$2"; shift 2 ;;
+      --enrollment-token) [ $# -ge 2 ] || die "--enrollment-token 缺少参数"; AGENT_ENROLLMENT_TOKEN="$2"; shift 2 ;;
+      --name) [ $# -ge 2 ] || die "--name 缺少参数"; AGENT_NODE_NAME="$2"; shift 2 ;;
+      --region) [ $# -ge 2 ] || die "--region 缺少参数"; AGENT_REGION="$2"; shift 2 ;;
       --root)
         [ $# -ge 2 ] || die "--root 缺少参数"
         INSTALL_ROOT="$2"
@@ -184,6 +197,9 @@ validate_tag() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ ]] && [[ "$1" == *.* ]] && [ "$1" != "panel.example.com" ]; }
 validate_email() { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] && [[ "$1" != *@example.com ]]; }
 validate_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+validate_agent_text() { [ -n "$1" ] && [ "${#1}" -le 80 ] && [[ "$1" != *$'\n'* ]] && [[ "$1" != *$'\r'* ]]; }
+validate_agent_control_url() { [[ "$1" =~ ^https://[^/?#[:space:]]+/?$ ]]; }
+validate_enrollment_token() { [[ "$1" =~ ^[A-Za-z0-9_-]{20,512}$ ]]; }
 
 os_release_value() {
   local key="$1" release_file="${PORTFLOW_OS_RELEASE_FILE:-/etc/os-release}"
@@ -623,6 +639,79 @@ acquire_release() {
   printf '%s' "$release_dir"
 }
 
+agent_release_architecture() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    *) die "当前节点架构不受 GitHub Agent 安装包支持：$(uname -m)（目前支持 amd64、arm64）" ;;
+  esac
+}
+
+install_and_enroll_agent() {
+  require_root
+  local repository tag architecture archive_name release_base stage checksums expected token_file
+  [ -z "$SOURCE_DIR_ARG" ] || die "Agent 一键安装只支持从 GitHub 正式版本下载，不能使用 --source"
+  repository=$(normalize_repository "$REPOSITORY_ARG") || die "Agent 安装需要 --repo OWNER/REPO"
+  tag="${RELEASE_TAG_ARG:-v$PROGRAM_VERSION}"
+  validate_tag "$tag" || die "发布标签包含不安全字符"
+  validate_agent_control_url "$AGENT_CONTROL_URL" || die "--control-url 必须是没有路径、查询参数或片段的 HTTPS 控制面地址"
+  validate_enrollment_token "$AGENT_ENROLLMENT_TOKEN" || die "--enrollment-token 格式不正确"
+  validate_agent_text "$AGENT_NODE_NAME" || die "--name 不能为空、不能含换行且最长 80 个字符"
+  [ -z "$AGENT_REGION" ] || validate_agent_text "$AGENT_REGION" || die "--region 不能含换行且最长 80 个字符"
+  has_command curl || die "Agent 远程安装需要 curl"
+  has_command tar || die "Agent 远程安装需要 tar"
+  has_command sha256sum || die "Agent 远程安装需要 sha256sum"
+  has_command systemctl || die "Agent 安装需要 systemd"
+  has_command runuser || die "Agent 安装需要 runuser"
+
+  architecture=$(agent_release_architecture)
+  archive_name="portflow-agent-linux-${architecture}.tar.gz"
+  release_base="https://github.com/$repository/releases/download/$tag"
+  stage=$(mktemp -d)
+  info "下载 PortFlow Agent $tag（linux/$architecture）"
+  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+    "$release_base/$archive_name" -o "$stage/$archive_name" \
+    || die "下载 Agent 安装包失败，请确认 GitHub Release 标签 $tag 已发布且包含 $archive_name"
+  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+    "$release_base/sha256sums.txt" -o "$stage/sha256sums.txt" \
+    || die "下载 Agent 校验文件失败"
+  grep -E "^[[:xdigit:]]{64}[[:space:]]{2}${archive_name}$" "$stage/sha256sums.txt" > "$stage/expected.sha256" \
+    || die "校验文件不包含 $archive_name"
+  (cd "$stage" && sha256sum -c expected.sha256) || die "Agent 安装包校验失败，已停止安装"
+  mkdir -p "$stage/unpacked"
+  tar -xzf "$stage/$archive_name" -C "$stage/unpacked" --strip-components=1 --no-same-owner --no-same-permissions \
+    || die "Agent 安装包解压失败"
+  [ -x "$stage/unpacked/portflow-agent" ] \
+    && [ -x "$stage/unpacked/deploy/agent/install.sh" ] \
+    && [ -f "$stage/unpacked/deploy/systemd/portflow-agent.service" ] \
+    || die "Agent 安装包内容不完整"
+
+  "$stage/unpacked/deploy/agent/install.sh" \
+    "$stage/unpacked/portflow-agent" "$stage/unpacked/deploy/systemd/portflow-agent.service"
+  rm -rf "$stage"
+  token_file=/var/lib/portflow-agent/enrollment-token
+  umask 077
+  printf '%s\n' "$AGENT_ENROLLMENT_TOKEN" > "$token_file"
+  chown portflow-agent:portflow-agent "$token_file"
+  chmod 0600 "$token_file"
+  info "正在注册节点身份（注册令牌不会作为 Agent 进程参数保存）"
+  if ! runuser -u portflow-agent -- /usr/local/bin/portflow-agent \
+    -config /var/lib/portflow-agent/config.json \
+    -control-url "$AGENT_CONTROL_URL" \
+    -enrollment-token-file "$token_file" \
+    -name "$AGENT_NODE_NAME" \
+    -region "$AGENT_REGION" \
+    -enroll-only; then
+    error "节点注册失败；安装文件已保留，注册令牌文件仍在 $token_file（权限 0600），请排查网络或重新生成令牌后重试"
+    return 1
+  fi
+  rm -f "$token_file"
+  systemctl enable --now portflow-agent.service
+  systemctl is-active --quiet portflow-agent.service || die "Agent 服务未能启动，请运行 journalctl -u portflow-agent --no-pager 查看原因"
+  success "Agent 已安装、注册并启动：$AGENT_NODE_NAME"
+  warning "本次 Agent 安装没有修改防火墙或云安全组；创建转发线路后，如入口端口不通，请在该节点单独运行防火墙管理并明确确认放行。"
+}
+
 switch_current() {
   local release_dir="$1" temporary_link="$INSTALL_ROOT/.current.new"
   ln -sfn "$release_dir" "$temporary_link"
@@ -947,6 +1036,7 @@ main() {
     backup) backup_database ;;
     restart) restart_control ;;
     rollback) rollback_control ;;
+    agent) install_and_enroll_agent ;;
     firewall) firewall_menu ;;
     uninstall) uninstall_control ;;
     check) check_environment ;;
