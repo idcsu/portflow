@@ -52,10 +52,12 @@ else
 fi
 
 mfa_key=$(read_env PORTFLOW_MFA_ENCRYPTION_KEY)
-if ! printf '%s' "$mfa_key" | grep -Eq '^[A-Fa-f0-9]{64}$'; then
-  fail "PORTFLOW_MFA_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters"
-else
+if printf '%s' "$mfa_key" | grep -Eq '^[A-Fa-f0-9]{64}$'; then
   pass "MFA secrets have a dedicated encryption key"
+elif [ -z "$mfa_key" ] && printf '%s' "$postgres_password" | grep -Eq '^[A-Fa-f0-9]{64}$'; then
+  warn "PORTFLOW_MFA_ENCRYPTION_KEY is absent; using the stable legacy PostgreSQL secret for this first v1.0.x upgrade"
+elif ! printf '%s' "$mfa_key" | grep -Eq '^[A-Fa-f0-9]{64}$'; then
+  fail "PORTFLOW_MFA_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters"
 fi
 
 version=$(read_env PORTFLOW_VERSION)

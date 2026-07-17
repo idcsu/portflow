@@ -51,6 +51,13 @@ printf '%s\n' \
   'PORTFLOW_HTTPS_BIND=443' > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
+# A v1.0.x manager cannot add the new MFA key before it runs the target release preflight.
+# The target Compose file must accept the installer-generated stable 64-hex legacy secret.
+"$PROJECT_DIR/scripts/preflight.sh" "$ENV_FILE" --offline >/dev/null
+[ -z "$(env_value PORTFLOW_MFA_ENCRYPTION_KEY)" ]
+ensure_mfa_key
+[ "$(env_value PORTFLOW_MFA_ENCRYPTION_KEY)" = "$(env_value POSTGRES_PASSWORD)" ]
+
 set_env_value PORTFLOW_HTTPS_BIND 8443
 [ "$(env_value PORTFLOW_HTTPS_BIND)" = "8443" ]
 [ "$(stat -c '%a' "$ENV_FILE")" = "600" ]

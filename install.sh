@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # PortFlow 中文交互式控制面管理器。
 # 系统级安装和防火墙变更必须先说明原因、影响与恢复方式，再获得明确确认。
 
-PROGRAM_VERSION="1.1.0"
+PROGRAM_VERSION="1.1.1"
 INSTALL_ROOT="${PORTFLOW_INSTALL_ROOT:-/opt/portflow}"
 RELEASES_DIR="$INSTALL_ROOT/releases"
 SHARED_DIR="$INSTALL_ROOT/shared"
@@ -67,7 +67,7 @@ PortFlow 中文部署管理器
 
 选项：
   --repo OWNER/REPO                 GitHub 仓库，例如 acme/portflow
-  --version VERSION                 发布版本，例如 1.1.0（对应标签 v1.1.0）
+  --version VERSION                 发布版本，例如 1.1.1（对应标签 v1.1.1）
   --tag TAG                         直接指定 Git 标签
   --source DIRECTORY                从本地源码目录安装，用于开发或离线部署
   --control-url URL                 Agent 注册使用的控制面 HTTPS 地址
@@ -595,15 +595,21 @@ write_initial_env() {
 }
 
 ensure_mfa_key() {
-  local key
+  local key legacy_key
   key=$(env_value PORTFLOW_MFA_ENCRYPTION_KEY)
   if [[ "$key" =~ ^[A-Fa-f0-9]{64}$ ]]; then
     return 0
   fi
-  key=$(generate_password)
+  legacy_key=$(env_value POSTGRES_PASSWORD)
+  if [[ "$legacy_key" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    key="$legacy_key"
+    info "检测到从 v1.0.x 升级，沿用稳定的旧密钥以保护二次验证数据"
+  else
+    key=$(generate_password)
+  fi
   set_env_value PORTFLOW_MFA_ENCRYPTION_KEY "$key"
-  unset key
-  info "已为二次验证生成独立加密密钥，并安全写入现有配置"
+  unset key legacy_key
+  info "已将二次验证加密密钥安全写入现有配置"
 }
 
 prepare_directories() {
@@ -820,7 +826,7 @@ update_control() {
   require_root
   require_runtime
   ensure_installed
-  local repository old_tag new_tag version new_release old_release
+  local repository old_tag new_tag version new_release old_release update_log
   repository="${REPOSITORY_ARG:-$(config_value PORTFLOW_REPOSITORY)}"
   repository=$(normalize_repository "$repository") || die "已保存的 GitHub 仓库格式不正确"
   old_tag="$(config_value PORTFLOW_RELEASE_TAG)"
@@ -834,11 +840,15 @@ update_control() {
   set_env_value PORTFLOW_VERSION "$version"
   ensure_mfa_key
   write_manager_config "$repository" "$new_tag"
-  if deploy_current; then
+  update_log="$BACKUP_DIR/update-failure-$(date -u +%Y%m%dT%H%M%SZ).log"
+  if deploy_current 2>&1 | tee "$update_log"; then
+    rm -f "$update_log"
     success "PortFlow 已更新到 $version"
     info "旧版本仍保留在 $old_release，可从回滚菜单恢复"
     return 0
   fi
+  chmod 600 "$update_log" 2>/dev/null || true
+  error "失败诊断已保存到 $update_log"
   error "新版本启动失败，正在自动回滚"
   switch_current "$old_release"
   set_env_value PORTFLOW_VERSION "${old_tag#v}"

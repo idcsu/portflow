@@ -41,7 +41,9 @@ services:
     environment:
       DATABASE_URL: postgres://portflow:${POSTGRES_PASSWORD}@postgres:5432/portflow?sslmode=disable
       PORTFLOW_SECURE_COOKIES: ${PORTFLOW_SECURE_COOKIES:-true}
-      PORTFLOW_MFA_ENCRYPTION_KEY: ${PORTFLOW_MFA_ENCRYPTION_KEY:?set PORTFLOW_MFA_ENCRYPTION_KEY in .env.production}
+      # Legacy v1.0.x updaters cannot add new environment keys before first start.
+      # Their generated PostgreSQL password is 64 hex characters and is a stable compatibility fallback.
+      PORTFLOW_MFA_ENCRYPTION_KEY: ${PORTFLOW_MFA_ENCRYPTION_KEY:-${POSTGRES_PASSWORD}}
     depends_on:
       postgres:
         condition: service_healthy

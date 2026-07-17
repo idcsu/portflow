@@ -68,7 +68,7 @@ const fallbackSummary: Summary = {
 }
 
 const emptyTraffic: TrafficHistory = { from: '', to: '', intervalSeconds: 1800, uploadBytes: 0, downloadBytes: 0, points: [] }
-const installerVersion = '1.1.0'
+const installerVersion = '1.1.1'
 const installerRepository = 'idcsu/portflow'
 
 function shellQuote(value: string) {
@@ -1175,7 +1175,7 @@ function App() {
               {logNextBefore && <button className="load-more" disabled={logLoading} onClick={() => loadLogs(logNextBefore, true)}>{logLoading ? '正在读取…' : '加载更早日志'}</button>}
             </section>
           </>}
-          <footer><span>PortFlow 控制面 · 1.1.0</span><span>数据面与控制面独立运行</span></footer>
+          <footer><span>PortFlow 控制面 · 1.1.1</span><span>数据面与控制面独立运行</span></footer>
         </div>
       </main>
       {showEnrollment && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="添加新节点"><button className="modal-backdrop" onClick={closeEnrollment} aria-label="关闭" /><section className="modal-card">

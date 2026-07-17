@@ -39,24 +39,24 @@ bash install.sh check
 发布 GitHub 仓库后，把下面的 `OWNER/REPO` 替换成实际仓库。建议始终固定到正式标签，不要直接使用可能变化的 `main` 分支：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.1.0/install.sh \
-  | sudo bash -s -- install --repo OWNER/REPO --version 1.1.0
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.1.1/install.sh \
+  | sudo bash -s -- install --repo OWNER/REPO --version 1.1.1
 ```
 
-脚本会从 `/dev/tty` 读取交互输入，所以通过管道运行时仍可填写域名、证书邮箱和端口。PostgreSQL 密码和二次验证加密密钥会在服务器本地分别随机生成，不会显示在屏幕上。更新旧版本时，如果尚无 `PORTFLOW_MFA_ENCRYPTION_KEY`，脚本也会自动生成一次并保持不变。
+脚本会从 `/dev/tty` 读取交互输入，所以通过管道运行时仍可填写域名、证书邮箱和端口。全新安装会在服务器本地分别生成 PostgreSQL 密码和二次验证加密密钥，不会显示在屏幕上。从 v1.0.x 首次升级时，旧管理器尚不认识新变量，兼容层会临时使用原安装器生成的稳定 64 位十六进制机密；后续由新版管理器将同一值明确写入 `PORTFLOW_MFA_ENCRYPTION_KEY`，不会破坏已经绑定的验证器。
 
 更谨慎的做法是先下载、检查，再执行：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/OWNER/REPO/v1.1.0/install.sh -o portflow-install.sh
+curl -fL https://raw.githubusercontent.com/OWNER/REPO/v1.1.1/install.sh -o portflow-install.sh
 less portflow-install.sh
-sudo bash portflow-install.sh install --repo OWNER/REPO --version 1.1.0
+sudo bash portflow-install.sh install --repo OWNER/REPO --version 1.1.1
 ```
 
 也可以从已经下载的源码离线安装：
 
 ```bash
-sudo bash install.sh install --source "$PWD" --version 1.1.0
+sudo bash install.sh install --source "$PWD" --version 1.1.1
 ```
 
 安装内容默认位于：
@@ -111,7 +111,7 @@ sudo portflow firewall
 在只有 Agent 的节点，可以直接从固定 GitHub 标签启动防火墙菜单：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.1.0/install.sh \
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.1.1/install.sh \
   | sudo bash -s -- firewall
 ```
 
@@ -140,10 +140,12 @@ curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v1.1.0/install.sh \
 5. 等待控制面健康检查；
 6. 若启动失败，自动恢复旧版本、旧版本号和旧容器。
 
+新版管理器还会把本次更新的完整预检、构建和启动输出保存到临时诊断文件；更新成功后自动删除，失败时在终端显示文件路径，避免回滚后的正常日志掩盖真正原因。
+
 更新命令：
 
 ```bash
-sudo portflow update --version 1.1.0
+sudo portflow update --version 1.1.1
 ```
 
 旧版本目录默认保留，可通过菜单中的“回滚版本”选择。数据库迁移可能不兼容旧程序时，应按发布说明同时恢复更新前的数据库备份。
@@ -166,6 +168,6 @@ sudo portflow update --version 1.1.0
 
 - `install.sh`、`scripts/preflight.sh` 和 `scripts/install_test.sh` 在 Git 中具有可执行权限；
 - `.env.production`、数据库备份、前端依赖和本地产物没有提交，仓库已提供 `.gitignore`；
-- 正式版本使用不可随意移动的标签，例如 `v1.1.0`；
+- 正式版本使用不可随意移动的标签，例如 `v1.1.1`；
 - 发布后先在一台全新测试机执行安装、更新、自动回滚和保留数据卸载；
 - Agent 节点继续按 [DEPLOYMENT.md](./DEPLOYMENT.md) 的 systemd 流程逐台安装。控制面管理器不会远程登录节点或批量重启 Agent。
