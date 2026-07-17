@@ -1,0 +1,6 @@
+.env.production
+backups/
+bin/
+*.dump
+web/dist/
+web/node_modules/

@@ -1,0 +1,126 @@
+name: portflow
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: portflow
+      POSTGRES_USER: portflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+      POSTGRES_INITDB_ARGS: --data-checksums --encoding=UTF8
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portflow -d portflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 30s
+    shm_size: 128mb
+    pids_limit: 200
+    logging: *default-logging
+    networks:
+      - backend
+
+  control:
+    image: portflow-control:${PORTFLOW_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: deploy/control/Dockerfile
+      args:
+        VERSION: ${PORTFLOW_VERSION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://portflow:${POSTGRES_PASSWORD}@postgres:5432/portflow?sslmode=disable
+      PORTFLOW_SECURE_COOKIES: ${PORTFLOW_SECURE_COOKIES:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-listen", "0.0.0.0:8080"]
+    expose:
+      - "8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "/portflow-control", "-healthcheck", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    logging: *default-logging
+    networks:
+      - backend
+
+  web:
+    image: portflow-web:${PORTFLOW_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: deploy/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORTFLOW_SITE_ADDRESS: ${PORTFLOW_SITE_ADDRESS:?set PORTFLOW_SITE_ADDRESS in .env.production}
+      CADDY_EMAIL: ${CADDY_EMAIL:?set CADDY_EMAIL in .env.production}
+    depends_on:
+      control:
+        condition: service_healthy
+    ports:
+      - "${PORTFLOW_HTTP_BIND:-80}:80"
+      - "${PORTFLOW_HTTPS_BIND:-443}:443"
+      - "${PORTFLOW_HTTPS_BIND:-443}:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    pids_limit: 100
+    stop_grace_period: 15s
+    logging: *default-logging
+    networks:
+      - backend
+      - edge
+
+  integration-test:
+    profiles:
+      - test
+    build:
+      context: .
+      dockerfile: deploy/test/Dockerfile
+    environment:
+      PORTFLOW_TEST_DATABASE_URL: postgres://portflow:${POSTGRES_PASSWORD}@postgres:5432/portflow?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  backend:
+    internal: true
+  edge:

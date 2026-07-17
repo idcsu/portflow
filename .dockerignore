@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+bin
+web/dist
+web/node_modules
+data
+backups
+*.log
+.env
+.env.production

@@ -1,0 +1,9 @@
+ALTER TABLE nodes
+    ADD COLUMN IF NOT EXISTS disk_percent DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (disk_percent BETWEEN 0 AND 100),
+    ADD COLUMN IF NOT EXISTS network_rx_bps BIGINT NOT NULL DEFAULT 0 CHECK (network_rx_bps >= 0),
+    ADD COLUMN IF NOT EXISTS network_tx_bps BIGINT NOT NULL DEFAULT 0 CHECK (network_tx_bps >= 0);
+
+ALTER TABLE node_metric_samples
+    ADD COLUMN IF NOT EXISTS disk_percent DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (disk_percent BETWEEN 0 AND 100),
+    ADD COLUMN IF NOT EXISTS network_rx_bps BIGINT NOT NULL DEFAULT 0 CHECK (network_rx_bps >= 0),
+    ADD COLUMN IF NOT EXISTS network_tx_bps BIGINT NOT NULL DEFAULT 0 CHECK (network_tx_bps >= 0);

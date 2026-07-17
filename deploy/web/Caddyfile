@@ -1,0 +1,26 @@
+{
+	admin off
+	email {$CADDY_EMAIL}
+}
+
+{$PORTFLOW_SITE_ADDRESS} {
+	encode zstd gzip
+
+	@api path /api/*
+	reverse_proxy @api control:8080
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	}
+}
