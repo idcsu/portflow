@@ -22,4 +22,5 @@ preflight:
 
 installer-test:
 	bash -n install.sh
+	bash -s -- --help < install.sh >/dev/null
 	./scripts/install_test.sh

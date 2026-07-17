@@ -92,9 +92,9 @@ curl --fail --show-error https://panel.example.com/api/v1/health
 在开发机或构建机上构建指定版本：
 
 ```bash
-make build VERSION=1.0.0
+make build VERSION=1.0.1
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -buildvcs=false -trimpath \
-  -ldflags "-s -w -X main.agentVersion=1.0.0" \
+  -ldflags "-s -w -X main.agentVersion=1.0.1" \
   -o bin/portflow-agent-linux-arm64 ./cmd/agent
 ```
 

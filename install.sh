@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # PortFlow 中文交互式控制面管理器。
 # 系统级安装和防火墙变更必须先说明原因、影响与恢复方式，再获得明确确认。
 
-PROGRAM_VERSION="1.0.0"
+PROGRAM_VERSION="1.0.1"
 INSTALL_ROOT="${PORTFLOW_INSTALL_ROOT:-/opt/portflow}"
 RELEASES_DIR="$INSTALL_ROOT/releases"
 SHARED_DIR="$INSTALL_ROOT/shared"
@@ -62,7 +62,7 @@ PortFlow 中文部署管理器
 
 选项：
   --repo OWNER/REPO                 GitHub 仓库，例如 acme/portflow
-  --version VERSION                 发布版本，例如 1.0.0（对应标签 v1.0.0）
+  --version VERSION                 发布版本，例如 1.0.1（对应标签 v1.0.1）
   --tag TAG                         直接指定 Git 标签
   --source DIRECTORY                从本地源码目录安装，用于开发或离线部署
   --root DIRECTORY                  安装根目录，默认 /opt/portflow
@@ -955,6 +955,6 @@ main() {
   esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
   main "$@"
 fi
