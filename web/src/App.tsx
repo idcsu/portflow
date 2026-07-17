@@ -6,21 +6,25 @@ import {
   Boxes,
   Cable,
   ChevronDown,
+  CheckCircle2,
   CircleDot,
   Gauge,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   Menu,
+  Moon,
   Network,
   Plus,
   Search,
   Settings,
   ShieldCheck,
+  Sun,
   TerminalSquare,
   Users,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 type Summary = {
   nodes: { online: number; offline: number }
@@ -49,7 +53,8 @@ type SystemSettings = {
   retention: { nodeMetricsDays: number; agentLogsDays: number; auditEventsAutoCleanup: boolean; activeConnectionsMode: string }
   deployment: { ready: boolean; storageMode: string; httpsObserved: boolean; activeAdministrators: number; checks: Array<{ id: string; label: string; status: 'pass' | 'fail'; detail: string }> }
 }
-type View = 'dashboard' | 'nodes' | 'connections' | 'monitoring' | 'logs' | 'audit' | 'members' | 'settings'
+type View = 'dashboard' | 'nodes' | 'rules' | 'connections' | 'monitoring' | 'logs' | 'audit' | 'members' | 'settings'
+type Theme = 'light' | 'dark'
 
 const fallbackSummary: Summary = {
   nodes: { online: 0, offline: 0 },
@@ -60,7 +65,7 @@ const fallbackSummary: Summary = {
 }
 
 const emptyTraffic: TrafficHistory = { from: '', to: '', intervalSeconds: 1800, uploadBytes: 0, downloadBytes: 0, points: [] }
-const installerVersion = '1.0.3'
+const installerVersion = '1.0.4'
 const installerRepository = 'idcsu/portflow'
 
 function shellQuote(value: string) {
@@ -228,6 +233,11 @@ function App() {
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const [notificationOpen, setNotificationOpen] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [theme, setTheme] = useState<Theme>(() => localStorage.getItem('portflow-theme') === 'dark' ? 'dark' : 'light')
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const [apiOnline, setApiOnline] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [checkingAuth, setCheckingAuth] = useState(true)
@@ -406,6 +416,27 @@ function App() {
   }, [])
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('portflow-theme', theme)
+  }, [theme])
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+      }
+      if (event.key === 'Escape') {
+        setSearchQuery('')
+        setNotificationOpen(false)
+        setAccountMenuOpen(false)
+      }
+    }
+    window.addEventListener('keydown', focusSearch)
+    return () => window.removeEventListener('keydown', focusSearch)
+  }, [])
+
+  useEffect(() => {
     if (!user) return
     const interval = window.setInterval(() => loadControlData().catch(() => setApiOnline(false)), 15_000)
     return () => window.clearInterval(interval)
@@ -432,11 +463,13 @@ function App() {
     setAuditNextBefore(null)
     setLogItems([])
     setLogNextBefore(null)
-	setConnectionItems([])
-	setMemberItems([])
-	setSystemSettings(null)
-	setSelectedNodeId('')
-	setNodeDetail(null)
+    setConnectionItems([])
+    setMemberItems([])
+    setSystemSettings(null)
+    setSelectedNodeId('')
+    setNodeDetail(null)
+    setAccountMenuOpen(false)
+    setNotificationOpen(false)
   }
 
   async function createEnrollmentToken(event: React.FormEvent) {
@@ -610,6 +643,18 @@ function App() {
     return { ...rule, node, egressNode, path, state, failureReason }
   })
 
+  const alertNotifications = [
+    ...(!apiOnline ? [{ id: 'api', title: '控制面连接中断', detail: '页面暂时无法刷新实时数据', view: 'dashboard' as View, level: 'warning' }] : []),
+    ...(summary.nodes.offline > 0 ? [{ id: 'nodes', title: `${summary.nodes.offline} 个节点离线`, detail: '请检查 Agent 服务或节点网络', view: 'nodes' as View, level: 'warning' }] : []),
+    ...(summary.rules.degraded > 0 ? [{ id: 'rules', title: `${summary.rules.degraded} 条线路需要处理`, detail: '存在同步失败、节点离线或未生效线路', view: 'rules' as View, level: 'warning' }] : []),
+  ]
+  const notifications = alertNotifications.length > 0 ? alertNotifications : [{ id: 'healthy', title: '系统运行正常', detail: '节点和已启用线路均处于预期状态', view: 'dashboard' as View, level: 'healthy' }]
+  const normalizedSearch = searchQuery.trim().toLocaleLowerCase()
+  const searchResults = normalizedSearch ? [
+    ...nodeItems.filter((node) => `${node.name} ${node.region} ${node.publicIp}`.toLocaleLowerCase().includes(normalizedSearch)).slice(0, 4).map((node) => ({ id: node.id, label: node.name, meta: `${node.region || '未设置地区'} · ${node.publicIp}`, kind: 'node' as const })),
+    ...routes.filter((route) => `${route.name} ${route.path} ${route.protocol}`.toLocaleLowerCase().includes(normalizedSearch)).slice(0, 4).map((route) => ({ id: route.id, label: route.name, meta: route.path, kind: 'rule' as const })),
+  ] : []
+
   const filteredConnections = connectionItems.filter((connection) =>
     (!connectionNodeFilter || connection.nodeId === connectionNodeFilter) &&
     (!connectionProtocolFilter || connection.protocol === connectionProtocolFilter))
@@ -617,7 +662,7 @@ function App() {
   const nav = [
     { label: '概览', icon: LayoutDashboard, view: 'dashboard' as View },
     { label: '节点', icon: Boxes, view: 'nodes' as View },
-    { label: '转发线路', icon: Cable, badge: String(ruleItems.length) },
+    { label: '转发线路', icon: Cable, view: 'rules' as View, badge: String(ruleItems.length) },
     { label: '实时连接', icon: Network, view: 'connections' as View, badge: connectionItems.length ? String(connectionItems.length) : undefined },
     { label: '监控分析', icon: Activity, view: 'monitoring' as View },
     { label: '运行日志', icon: TerminalSquare, view: 'logs' as View, adminOnly: true },
@@ -647,7 +692,7 @@ function App() {
         <nav>
           <p className="nav-title">工作台</p>
           {nav.map(({ label, icon: Icon, view, badge }) => (
-            <button key={label} disabled={!view} onClick={() => view && switchView(view)} className={view === activeView ? 'nav-item active' : 'nav-item'}>
+            <button key={label} onClick={() => switchView(view)} className={view === activeView ? 'nav-item active' : 'nav-item'}>
               <Icon size={18} /><span>{label}</span>{badge && <em>{badge}</em>}
             </button>
           ))}
@@ -666,11 +711,25 @@ function App() {
       <main>
         <header className="topbar">
           <button className="menu-button" onClick={() => setMenuOpen(true)} aria-label="打开菜单"><Menu /></button>
-          <div className="search"><Search size={17} /><input aria-label="全局搜索" placeholder="搜索节点、线路或日志..." /><kbd>⌘ K</kbd></div>
+          <div className="search-shell">
+            <div className="search"><Search size={17} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} aria-label="全局搜索" placeholder="搜索节点或线路..." /><kbd>⌘ K</kbd>{searchQuery && <button onClick={() => setSearchQuery('')} aria-label="清空搜索"><X size={14} /></button>}</div>
+            {normalizedSearch && <div className="top-popover search-popover">
+              <div className="popover-heading"><b>搜索结果</b><span>{searchResults.length} 项</span></div>
+              {searchResults.map((result) => <button key={`${result.kind}-${result.id}`} className="search-result" onClick={() => { if (result.kind === 'node') openNode(result.id); else switchView('rules'); setSearchQuery('') }}><span className={result.kind === 'node' ? 'search-result-icon node' : 'search-result-icon rule'}>{result.kind === 'node' ? <Boxes size={15} /> : <Cable size={15} />}</span><span><b>{result.label}</b><small>{result.meta}</small></span></button>)}
+              {searchResults.length === 0 && <div className="popover-empty">没有匹配的节点或线路</div>}
+            </div>}
+          </div>
           <div className="top-actions">
-            <button className="icon-button" aria-label="通知"><Bell size={19} /><span className="notification-dot" /></button>
+            <button className="icon-button theme-button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={theme === 'light' ? '切换到深色主题' : '切换到明亮主题'} title={theme === 'light' ? '切换到深色主题' : '切换到明亮主题'}>{theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}</button>
+            <div className="top-action-shell">
+              <button className={notificationOpen ? 'icon-button active' : 'icon-button'} onClick={() => { setNotificationOpen(!notificationOpen); setAccountMenuOpen(false) }} aria-label="通知" aria-expanded={notificationOpen}><Bell size={19} />{alertNotifications.length > 0 && <span className="notification-dot" />}</button>
+              {notificationOpen && <div className="top-popover notification-popover"><div className="popover-heading"><b>状态通知</b><span>{alertNotifications.length > 0 ? `${alertNotifications.length} 项待处理` : '当前正常'}</span></div>{notifications.map((notification) => <button key={notification.id} className="notification-item" onClick={() => { switchView(notification.view); setNotificationOpen(false) }}><span className={notification.level === 'healthy' ? 'notice-icon healthy' : 'notice-icon warning'}>{notification.level === 'healthy' ? <CheckCircle2 size={16} /> : <Bell size={16} />}</span><span><b>{notification.title}</b><small>{notification.detail}</small></span></button>)}</div>}
+            </div>
             <div className="divider" />
-            <button className="profile" onClick={logout} title="退出登录"><span className="avatar">{user.username.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{user.username}</b><small>{user.role === 'admin' ? '管理员' : '普通成员'}</small></span><ChevronDown size={16} /></button>
+            <div className="top-action-shell">
+              <button className={accountMenuOpen ? 'profile active' : 'profile'} onClick={() => { setAccountMenuOpen(!accountMenuOpen); setNotificationOpen(false) }} aria-label="打开账户菜单" aria-expanded={accountMenuOpen}><span className="avatar">{user.username.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{user.username}</b><small>{user.role === 'admin' ? '管理员' : '普通成员'}</small></span><ChevronDown size={16} /></button>
+              {accountMenuOpen && <div className="top-popover account-popover"><div className="account-summary"><span className="avatar large">{user.username.slice(0, 1).toUpperCase()}</span><span><b>{user.username}</b><small>{user.role === 'admin' ? '管理员账户' : '普通成员账户'}</small></span></div><button className="account-action" onClick={() => void logout()}><LogOut size={16} /><span>退出登录</span></button></div>}
+            </div>
           </div>
         </header>
 
@@ -690,7 +749,7 @@ function App() {
 
           <section className="dashboard-grid">
             <article className="panel traffic-panel">
-              <div className="panel-heading"><div><h2>流量趋势</h2><p>所有线路聚合 · 最近 24 小时</p></div><button className="select-button">最近 24 小时 <ChevronDown size={15} /></button></div>
+              <div className="panel-heading"><div><h2>流量趋势</h2><p>所有线路聚合 · 最近 24 小时</p></div><span className="retention-badge">最近 24 小时</span></div>
               <div className="traffic-legend">
                 <div><span className="legend-icon download"><ArrowDownToLine size={16} /></span><span><small>下载</small><b>{formatBytes(summary.trafficToday.downloadBytes)}</b></span></div>
                 <div><span className="legend-icon upload"><ArrowUpFromLine size={16} /></span><span><small>上传</small><b>{formatBytes(summary.trafficToday.uploadBytes)}</b></span></div>
@@ -715,11 +774,30 @@ function App() {
           </section>
 
           <section className="panel routes-panel">
-            <div className="panel-heading"><div><h2>活跃线路</h2><p>Agent 最近一次上报的独立统计</p></div><button className="text-button">管理所有线路</button></div>
+            <div className="panel-heading"><div><h2>活跃线路</h2><p>Agent 最近一次上报的独立统计</p></div><button className="text-button" onClick={() => switchView('rules')}>管理所有线路</button></div>
             <div className="table-wrap"><table><thead><tr><th>线路</th><th>路径</th><th>协议</th><th>连接/会话</th><th>本次运行流量</th><th>状态</th><th>操作</th></tr></thead><tbody>
               {routes.map((route) => <tr key={route.id}><td><div className="route-name"><span><Cable size={16} /></span><b>{route.name}</b></div></td><td className="route-path">{route.path}</td><td><span className="protocol">{route.protocol === 'tcp_udp' ? 'TCP+UDP' : route.protocol.toUpperCase()}</span></td><td>{route.activeConnections.toLocaleString()} / {route.maxConnections ? route.maxConnections.toLocaleString() : '不限'}</td><td>{formatBytes(route.bytesIn + route.bytesOut)}</td><td><span title={route.failureReason} className={route.state === '已生效' ? 'route-state healthy' : route.state === '等待同步' ? 'route-state pending' : route.state === '应用失败' ? 'route-state failed' : 'route-state stopped'}><i />{route.state}</span></td><td><div className="row-actions"><button onClick={() => openCopyRule(route)}>复制</button><button onClick={() => openEditRule(route)}>编辑</button><button className="danger" onClick={() => deleteRule(route)}>删除</button></div></td></tr>)}
             </tbody></table></div>
           </section>
+          </>}
+          {activeView === 'rules' && <>
+            <section className="page-heading">
+              <div><p className="eyebrow">FORWARDING ROUTES</p><h1>转发线路</h1><p>集中创建、复制、编辑和删除线路，并查看 Agent 的实际应用状态。</p></div>
+              <button className="primary-button" onClick={openCreateRule}><Plus size={18} />创建转发线路</button>
+            </section>
+            <section className="stat-grid monitoring-stats">
+              <article className="stat-card"><div className="stat-icon blue"><Cable /></div><div className="stat-meta"><span>全部线路</span><b>{routes.length}</b><em>当前控制面配置</em></div></article>
+              <article className="stat-card"><div className="stat-icon mint"><CheckCircle2 /></div><div className="stat-meta"><span>已生效</span><b>{routes.filter((route) => route.state === '已生效').length}</b><em className="positive">Agent 已确认应用</em></div></article>
+              <article className="stat-card"><div className="stat-icon amber"><Activity /></div><div className="stat-meta"><span>等待或异常</span><b>{routes.filter((route) => route.enabled && route.state !== '已生效').length}</b><em>同步与节点状态</em></div></article>
+              <article className="stat-card"><div className="stat-icon violet"><Network /></div><div className="stat-meta"><span>活跃连接</span><b>{routes.reduce((total, route) => total + route.activeConnections, 0).toLocaleString()}</b><em>最近一次 Agent 心跳</em></div></article>
+            </section>
+            <section className="panel routes-panel routes-management-panel">
+              <div className="panel-heading"><div><h2>线路列表</h2><p>状态以节点最近一次配置确认和心跳为准</p></div><span className="retention-badge">{routes.length} 条线路</span></div>
+              <div className="table-wrap"><table><thead><tr><th>线路</th><th>路径</th><th>协议</th><th>连接/会话</th><th>本次运行流量</th><th>状态</th><th>操作</th></tr></thead><tbody>
+                {routes.map((route) => <tr key={route.id}><td><div className="route-name"><span><Cable size={16} /></span><b>{route.name}</b></div></td><td className="route-path">{route.path}</td><td><span className="protocol">{route.protocol === 'tcp_udp' ? 'TCP+UDP' : route.protocol.toUpperCase()}</span></td><td>{route.activeConnections.toLocaleString()} / {route.maxConnections ? route.maxConnections.toLocaleString() : '不限'}</td><td>{formatBytes(route.bytesIn + route.bytesOut)}</td><td><span title={route.failureReason} className={route.state === '已生效' ? 'route-state healthy' : route.state === '等待同步' ? 'route-state pending' : route.state === '应用失败' ? 'route-state failed' : 'route-state stopped'}><i />{route.state}</span></td><td><div className="row-actions"><button onClick={() => openCopyRule(route)}>复制</button><button onClick={() => openEditRule(route)}>编辑</button><button className="danger" onClick={() => deleteRule(route)}>删除</button></div></td></tr>)}
+              </tbody></table></div>
+              {routes.length === 0 && <div className="empty-state"><Cable size={23} /><b>还没有转发线路</b><span>创建第一条线路后，Agent 会自动拉取并应用配置</span><button className="empty-action" onClick={openCreateRule}>立即创建</button></div>}
+            </section>
           </>}
           {activeView === 'nodes' && <>
             <section className="page-heading">
@@ -916,7 +994,7 @@ function App() {
               {logNextBefore && <button className="load-more" disabled={logLoading} onClick={() => loadLogs(logNextBefore, true)}>{logLoading ? '正在读取…' : '加载更早日志'}</button>}
             </section>
           </>}
-          <footer><span>PortFlow 控制面 · 0.2</span><span>数据面与控制面独立运行</span></footer>
+          <footer><span>PortFlow 控制面 · 1.0.4</span><span>数据面与控制面独立运行</span></footer>
         </div>
       </main>
       {showEnrollment && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="添加新节点"><button className="modal-backdrop" onClick={closeEnrollment} aria-label="关闭" /><section className="modal-card">
